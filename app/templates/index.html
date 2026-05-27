@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ArchWise 架构风格智能助手</title>
+  <link rel="stylesheet" href="/static/styles.css?v=20260527-4">
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+</head>
+<body>
+  <main class="app-shell">
+    <section class="workbench">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">ArchWise</p>
+          <h1>软件体系结构风格智能助手</h1>
+        </div>
+        <a class="api-link" href="/docs" target="_blank" rel="noreferrer">API 文档</a>
+      </header>
+
+      <section class="input-panel">
+        <label for="requirement">需求描述</label>
+        <textarea id="requirement">开发一个跨平台的即时通讯系统，要求支持万人同时在线，需要保证消息的实时性和可靠性，后期可能需要快速扩展视频通话功能</textarea>
+        <div class="actions">
+          <button id="recommendBtn" type="button">生成推荐</button>
+          <label class="inline-field" for="topK">
+            <span>对比范围</span>
+            <select id="topK">
+              <option value="12" selected>完整 12 种</option>
+              <option value="6">精简 6 种</option>
+              <option value="3">重点 3 种</option>
+            </select>
+          </label>
+          <span id="status">等待输入</span>
+        </div>
+      </section>
+
+      <section class="grid">
+        <article class="panel">
+          <h2>最终推荐</h2>
+          <div id="winner" class="winner empty">暂无结果</div>
+        </article>
+        <article class="panel">
+          <h2>需求特征</h2>
+          <div id="features" class="feature-list empty">暂无结果</div>
+        </article>
+      </section>
+
+      <section class="panel">
+        <div class="panel-title-row">
+          <h2>架构组合推荐</h2>
+          <span id="compositionStatus" class="section-meta">暂无结果</span>
+        </div>
+        <div id="composition" class="composition empty">暂无结果</div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-title-row">
+          <h2>候选架构对比矩阵</h2>
+          <span id="matrixCount" class="section-meta">暂无结果</span>
+        </div>
+        <div class="table-wrap">
+          <table id="matrix"></table>
+        </div>
+      </section>
+
+      <section class="grid">
+        <article class="panel">
+          <h2>评估报告</h2>
+          <div id="report" class="report markdown-body">暂无结果</div>
+        </article>
+        <article class="panel">
+          <details class="trace-box decision-box" open>
+            <summary>
+              <span>决策溯源</span>
+              <small id="decisionSummary">暂无决策证据</small>
+            </summary>
+            <div id="decisionTrace" class="decision-trace empty">暂无结果</div>
+          </details>
+        </article>
+      </section>
+
+      <section class="panel">
+          <details class="trace-box">
+            <summary>
+              <span>Agent 协作追踪</span>
+              <small id="traceSummary">暂无推理过程</small>
+            </summary>
+            <ol id="trace" class="trace"></ol>
+          </details>
+      </section>
+
+      <section class="panel">
+        <div class="panel-title-row">
+          <h2>架构拓扑图</h2>
+          <div class="copy-actions">
+            <button id="copyMermaidBtn" type="button" class="ghost-button">复制 Mermaid</button>
+            <button id="copySvgBtn" type="button" class="ghost-button">复制 SVG</button>
+          </div>
+        </div>
+        <div id="topologyTabs" class="tabs"></div>
+        <div id="topology" class="topology"></div>
+      </section>
+    </section>
+  </main>
+  <script src="/static/app.js?v=20260527-4"></script>
+</body>
+</html>
