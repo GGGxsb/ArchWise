@@ -63,6 +63,24 @@ class TopologyGenerator:
         "状态服务": "status_service",
         "状态缓存": "status_cache",
         "信令服务": "signaling_service",
+        "商品服务": "product",
+        "商品库": "product_db",
+        "购物车服务": "cart",
+        "购物车缓存": "cart_cache",
+        "订单服务": "order",
+        "订单库": "order_db",
+        "支付服务": "payment",
+        "支付库": "payment_db",
+        "库存服务": "inventory",
+        "库存库": "inventory_db",
+        "促销服务": "promotion",
+        "秒杀服务": "flash_sale",
+        "退款服务": "refund",
+        "物流服务": "logistics",
+        "物流库": "logistics_db",
+        "搜索服务": "search_service",
+        "风控服务": "risk_control",
+        "配置中心": "config_center",
         "缓存集群": "cache",
         "消息队列": "event_bus",
         "事件总线": "event_bus",
@@ -78,13 +96,13 @@ class TopologyGenerator:
     SINGLETON_COMPONENTS = {
         "客户端", "CDN", "负载均衡", "API网关", "直播网关", "设备网关", "视频网关",
         "事件总线", "消息队列", "任务队列", "数据管道", "缓存集群", "对象存储",
-        "搜索索引", "特征库", "模型库", "服务注册", "监控服务", "审计服务",
+        "搜索索引", "特征库", "模型库", "服务注册", "监控服务", "审计服务", "配置中心",
     }
 
     SOCIAL_KEYWORDS = ["社交", "发帖", "点赞", "评论", "私信", "内容推荐", "关注", "粉丝"]
     EDUCATION_KEYWORDS = ["在线教育", "上课", "课程", "直播", "录播", "回放", "课后互动", "作业", "考试", "课堂"]
     MEDIA_KEYWORDS = ["视频", "图片", "短视频", "转码", "直播", "录播"]
-    COMMERCE_KEYWORDS = ["订单", "支付", "退款", "库存", "促销", "下单"]
+    COMMERCE_KEYWORDS = ["电商", "商品", "购物车", "订单", "支付", "退款", "库存", "促销", "下单", "秒杀", "物流", "灰度"]
     IOT_KEYWORDS = ["设备", "传感器", "采集", "告警", "远程控制"]
     AI_KEYWORDS = ["AI", "智能", "推荐算法", "生成", "大模型"]
 
@@ -120,7 +138,7 @@ class TopologyGenerator:
         if any(keyword in text for keyword in self.MEDIA_KEYWORDS):
             capabilities.extend(["媒体", "对象存储", "转码", "CDN"])
         if any(keyword in text for keyword in self.COMMERCE_KEYWORDS):
-            capabilities.extend(["订单", "支付", "库存", "对账"])
+            capabilities.extend(["电商", "商品", "购物车", "订单", "支付", "库存", "促销", "秒杀", "物流", "退款", "风控", "灰度"])
         if any(keyword in text for keyword in self.IOT_KEYWORDS):
             capabilities.extend(["设备", "采集", "告警", "控制"])
         if any(keyword in text for keyword in self.AI_KEYWORDS) or features.quality_attributes.get("ai_reasoning", 0) >= 0.6:
@@ -178,6 +196,8 @@ class TopologyGenerator:
         else:
             self._validate_social(capabilities, nodes, add, link, notes)
             self._validate_education(capabilities, nodes, add, link, notes)
+            self._validate_commerce(capabilities, nodes, add, link, notes)
+        self._validate_and_repair_topology(capabilities, features, nodes, add, link, notes)
         nodes, edges = self._dedupe_graph(nodes, edges, notes)
         self._apply_composition_responsibilities(nodes, edges, winner, composition_recommendation, notes)
 
@@ -351,6 +371,38 @@ class TopologyGenerator:
             add("object_store", "对象存储", "数据层")
         if "AI" in capabilities:
             add("ai", "AI服务", "业务服务层")
+        if "商品" in capabilities:
+            add("product", "商品服务", "业务服务层")
+            add("product_db", "商品库", "数据层")
+            add("search", "搜索索引", "数据层")
+        if "购物车" in capabilities:
+            add("cart", "购物车服务", "业务服务层")
+            add("cart_cache", "购物车缓存", "数据层")
+        if "订单" in capabilities:
+            add("order", "订单服务", "业务服务层")
+            add("order_db", "订单库", "数据层")
+        if "支付" in capabilities:
+            add("payment", "支付服务", "业务服务层")
+            add("payment_db", "支付库", "数据层")
+        if "库存" in capabilities:
+            add("inventory", "库存服务", "业务服务层")
+            add("inventory_db", "库存库", "数据层")
+        if "促销" in capabilities:
+            add("promotion", "促销服务", "业务服务层")
+        if "秒杀" in capabilities:
+            add("flash_sale", "秒杀服务", "业务服务层")
+            add("event_bus", "事件总线", "异步事件层")
+            add("cache", "缓存集群", "数据层")
+        if "物流" in capabilities:
+            add("logistics", "物流服务", "业务服务层")
+            add("logistics_db", "物流库", "数据层")
+        if "退款" in capabilities:
+            add("refund", "退款服务", "业务服务层")
+        if "风控" in capabilities:
+            add("risk_control", "风控服务", "治理层")
+        if "灰度" in capabilities:
+            add("config_center", "配置中心", "治理层")
+            add("service_registry", "服务注册", "治理层")
 
     def _apply_graph_knowledge(self, graph_knowledge, nodes, edges, add, link, notes) -> None:
         components = graph_knowledge.get("components", [])
@@ -556,6 +608,115 @@ class TopologyGenerator:
         link("replay", "object_store", "读取")
         link("cache", "live", "热点加速")
 
+    def _validate_commerce(self, capabilities, nodes, add, link, notes) -> None:
+        capability_text = " ".join(capabilities)
+        if not any(item in capability_text for item in ["电商", "商品", "购物车", "订单", "支付", "库存", "秒杀", "物流"]):
+            return
+        required = {
+            "product": ("商品服务", "业务服务层"),
+            "product_db": ("商品库", "数据层"),
+            "cart": ("购物车服务", "业务服务层"),
+            "cart_cache": ("购物车缓存", "数据层"),
+            "order": ("订单服务", "业务服务层"),
+            "order_db": ("订单库", "数据层"),
+            "payment": ("支付服务", "业务服务层"),
+            "payment_db": ("支付库", "数据层"),
+            "inventory": ("库存服务", "业务服务层"),
+            "inventory_db": ("库存库", "数据层"),
+            "event_bus": ("事件总线", "异步事件层"),
+            "cache": ("缓存集群", "数据层"),
+            "monitoring": ("监控服务", "治理层"),
+        }
+        if "秒杀" in capability_text:
+            required["flash_sale"] = ("秒杀服务", "业务服务层")
+        if "物流" in capability_text:
+            required["logistics"] = ("物流服务", "业务服务层")
+            required["logistics_db"] = ("物流库", "数据层")
+        if "促销" in capability_text:
+            required["promotion"] = ("促销服务", "业务服务层")
+        if "退款" in capability_text:
+            required["refund"] = ("退款服务", "业务服务层")
+        if "风控" in capability_text:
+            required["risk_control"] = ("风控服务", "治理层")
+        if "灰度" in capability_text:
+            required["config_center"] = ("配置中心", "治理层")
+            required["service_registry"] = ("服务注册", "治理层")
+
+        for node_id, (name, layer) in required.items():
+            if node_id not in nodes:
+                add(node_id, name, layer)
+                notes.append(f"拓扑规则补全：电商交易场景需要{name}")
+
+        link("gateway", "product", "商品")
+        link("gateway", "cart", "购物车")
+        link("gateway", "order", "下单")
+        link("gateway", "payment", "支付")
+        link("gateway", "inventory", "库存")
+        link("product", "product_db", "商品")
+        link("product", "search", "检索")
+        link("cart", "cart_cache", "缓存")
+        link("order", "order_db", "订单")
+        link("order", "payment", "支付")
+        link("order", "inventory", "扣库存")
+        link("payment", "payment_db", "交易")
+        link("inventory", "inventory_db", "库存")
+        link("order", "event_bus", "订单事件", "event")
+        link("inventory", "event_bus", "库存事件", "event")
+        link("event_bus", "notify", "通知", "event")
+        link("cache", "product", "热点")
+        link("cache", "cart", "热点")
+        if "flash_sale" in nodes:
+            link("gateway", "flash_sale", "秒杀")
+            link("flash_sale", "cache", "热点库存")
+            link("flash_sale", "event_bus", "削峰", "event")
+            link("event_bus", "order", "异步下单", "event")
+        if "promotion" in nodes:
+            link("gateway", "promotion", "促销")
+            link("promotion", "cache", "活动缓存")
+        if "logistics" in nodes:
+            link("event_bus", "logistics", "物流通知", "event")
+            link("logistics", "logistics_db", "轨迹")
+        if "refund" in nodes:
+            link("gateway", "refund", "售后")
+            link("refund", "order_db", "订单")
+        if "risk_control" in nodes:
+            link("risk_control", "payment", "风控")
+        if "config_center" in nodes and "service_registry" in nodes:
+            link("config_center", "service_registry", "灰度配置")
+
+    def _validate_and_repair_topology(self, capabilities, features, nodes, add, link, notes) -> None:
+        repairs = []
+        capability_text = " ".join(capabilities)
+        if any(item in capability_text for item in ["电商", "商品", "购物车", "订单", "支付", "库存", "秒杀", "物流"]):
+            before = set(nodes)
+            self._validate_commerce(capabilities, nodes, add, link, notes)
+            repairs.extend(node_id for node_id in nodes if node_id not in before)
+            expected = ["product", "cart", "order", "payment", "inventory"]
+            covered = sum(1 for node_id in expected if node_id in nodes)
+            if covered < len(expected):
+                notes.append(f"拓扑自检：电商核心能力覆盖率 {covered}/{len(expected)}，已触发自补全")
+            else:
+                notes.append(f"拓扑自检：电商核心能力覆盖率 {covered}/{len(expected)}")
+
+        qualities = features.quality_attributes
+        if qualities.get("concurrency", 0) >= 0.75:
+            for node_id, name, layer in [("lb", "负载均衡", "接入层"), ("cache", "缓存集群", "数据层"), ("event_bus", "事件总线", "异步事件层")]:
+                if node_id not in nodes:
+                    add(node_id, name, layer)
+                    repairs.append(node_id)
+            link("lb", "gateway", "路由")
+        if qualities.get("reliability", 0) >= 0.7:
+            for node_id, name in [("monitoring", "监控服务"), ("audit", "审计服务")]:
+                if node_id not in nodes:
+                    add(node_id, name, "治理层")
+                    repairs.append(node_id)
+        if qualities.get("scalability", 0) >= 0.7 and "service_registry" not in nodes:
+            add("service_registry", "服务注册", "治理层")
+            repairs.append("service_registry")
+
+        if repairs:
+            notes.append("拓扑自补全：根据需求能力和质量属性补充 " + "、".join(dict.fromkeys(repairs)))
+
     def _render_mermaid(self, nodes: list[TopologyNode], edges: list[TopologyEdge]) -> str:
         layer_names = ["架构模式职责", "接入层", "业务服务层", "异步事件层", "治理层", "数据层"]
         lines = ["flowchart TD"]
@@ -680,6 +841,6 @@ class TopologyGenerator:
             return "接入层"
         if name in ["消息队列", "事件总线", "任务队列", "数据管道", "实时计算", "离线分析", "转码服务"]:
             return "异步事件层"
-        if name in ["审核服务", "审计服务", "风控服务", "防作弊服务", "监控服务"]:
+        if name in ["审核服务", "审计服务", "风控服务", "防作弊服务", "监控服务", "配置中心"]:
             return "治理层"
         return "业务服务层"

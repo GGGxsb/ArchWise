@@ -246,3 +246,71 @@ def test_topology_does_not_add_composition_layer_when_not_needed():
 
     assert "架构模式职责" not in mermaid
     assert "style_primary" not in mermaid
+
+
+def test_ecommerce_topology_repairs_missing_domain_components_without_graph_knowledge():
+    requirement = (
+        "我们要构建一个面向全国用户的电商平台，支持商品浏览、购物车、下单支付、订单管理与物流跟踪。"
+        "大促期间有秒杀活动，瞬时并发可达每秒数万笔订单，要求系统具备高并发、弹性伸缩与高可用能力，"
+        "订单与库存数据需保证最终一致性。团队希望按业务域拆分为多个微服务，支持独立部署与灰度发布。"
+    )
+    features = RequirementParserAgent().parse(requirement)
+    winner = CandidateEvaluation(
+        style_id="microservices",
+        name="微服务架构",
+        score=96,
+        matched_reasons=[],
+        risks=[],
+        quality_scores={"scalability": 0.92, "performance": 0.82, "reliability": 0.82, "realtime": 0.5},
+    )
+
+    mermaid, notes = TopologyGenerator().generate(requirement, features, winner)
+
+    assert "商品服务" in mermaid
+    assert "购物车服务" in mermaid
+    assert "订单服务" in mermaid
+    assert "支付服务" in mermaid
+    assert "库存服务" in mermaid
+    assert "秒杀服务" in mermaid
+    assert "物流服务" in mermaid
+    assert "事件总线" in mermaid
+    assert "缓存集群" in mermaid
+    assert "服务注册" in mermaid
+    assert "监控服务" in mermaid
+    assert "订单服务" in mermaid and "支付服务" in mermaid
+    assert "拓扑自检：电商核心能力覆盖率" in " ".join(notes)
+
+
+def test_ecommerce_graph_topology_repairs_partial_neo4j_result():
+    requirement = "电商平台支持商品浏览、购物车、下单支付、库存最终一致性、物流跟踪和秒杀活动"
+    features = RequirementParserAgent().parse(requirement)
+    winner = CandidateEvaluation(
+        style_id="microservices",
+        name="微服务架构",
+        score=95,
+        matched_reasons=[],
+        risks=[],
+        quality_scores={"scalability": 0.9, "performance": 0.8, "reliability": 0.8, "realtime": 0.45},
+    )
+    graph_knowledge = {
+        "components": ["商品服务", "订单服务", "支付服务"],
+        "stores": ["商品库", "订单库", "支付库"],
+        "edges": [
+            {"source": "订单服务", "target": "支付服务", "label": "支付", "kind": "sync"},
+            {"source": "商品服务", "target": "商品库", "label": "读写", "kind": "sync"},
+        ],
+        "scenarios": ["电商交易"],
+        "capabilities": ["商品浏览", "购物车", "订单管理", "支付结算", "库存管理", "秒杀活动", "物流跟踪"],
+    }
+
+    mermaid, notes = TopologyGenerator().generate(requirement, features, winner, graph_knowledge=graph_knowledge)
+
+    assert "购物车服务" in mermaid
+    assert "库存服务" in mermaid
+    assert "秒杀服务" in mermaid
+    assert "物流服务" in mermaid
+    assert "购物车缓存" in mermaid
+    assert "库存库" in mermaid
+    assert "物流库" in mermaid
+    assert "拓扑生成策略：Neo4j 图谱作为主知识源" in " ".join(notes)
+    assert "拓扑自检：电商核心能力覆盖率" in " ".join(notes)

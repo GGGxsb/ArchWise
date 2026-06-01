@@ -22,9 +22,12 @@ class KnowledgeGraphService:
 
     def build_graph(self, styles: list[ArchitectureStyle]) -> dict[str, list[dict[str, str]]]:
         if self.neo4j.configured:
-            graph = self.neo4j.fetch_graph()
-            if graph["nodes"]:
-                return graph
+            try:
+                graph = self.neo4j.fetch_graph()
+                if graph["nodes"]:
+                    return graph
+            except Exception:
+                pass
 
         nodes: dict[str, dict[str, str]] = {}
         edges: list[dict[str, str]] = []
