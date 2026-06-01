@@ -215,6 +215,60 @@ class LLMClient:
             return []
         return [line.strip("- 1234567890.、") for line in content.splitlines() if line.strip()][:3]
 
+    async def propose_topology_knowledge_patch(
+        self,
+        requirement: str,
+        features: ExtractedFeatures,
+        coverage: dict[str, Any],
+        graph_knowledge: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        if not self.api_key:
+            return None
+
+        prompt = (
+            "你是软件架构知识图谱补全 Agent。当前系统要生成架构拓扑图，但 Neo4j 知识覆盖率不足。\n"
+            "请根据用户需求、已抽取特征、已有图谱知识和缺失组件，补全领域能力、架构组件、数据存储和依赖关系。\n"
+            "只返回 JSON，不要 Markdown，不要解释。\n\n"
+            "JSON 格式必须为：\n"
+            "{\n"
+            "  \"capabilities\": [{\"name\":\"能力名\", \"components\":[\"组件名\"], \"stores\":[\"存储名\"]}],\n"
+            "  \"components\": [\"组件名\"],\n"
+            "  \"stores\": [\"存储名\"],\n"
+            "  \"edges\": [{\"source\":\"源组件\", \"target\":\"目标组件\", \"label\":\"关系\", \"kind\":\"sync|event\"}],\n"
+            "  \"reason\": \"一句话说明补全依据\"\n"
+            "}\n\n"
+            "约束：\n"
+            "1. 组件名称使用中文，2 到 8 个字。\n"
+            "2. 只补充和本需求直接相关的组件，避免泛化过度。\n"
+            "3. 高并发/秒杀场景必须考虑缓存、消息队列或事件总线。\n"
+            "4. 最终一致性场景必须考虑事件关系或异步消息关系。\n"
+            "5. 支付/订单/库存/物流等业务能力需要体现服务和数据存储。\n\n"
+            f"用户需求：{requirement}\n"
+            f"需求特征：{features.model_dump_json()}\n"
+            f"覆盖率评估：{json.dumps(coverage, ensure_ascii=False)}\n"
+            f"已有图谱知识：{json.dumps(graph_knowledge, ensure_ascii=False)}\n"
+        )
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": "你是谨慎的软件架构知识图谱补全 Agent，只输出可解析 JSON。"},
+                {"role": "user", "content": prompt},
+            ],
+            "thinking": {"type": "disabled"},
+            "temperature": 0.1,
+            "stream": False,
+            "response_format": {"type": "json_object"},
+            "max_tokens": 1400,
+        }
+        content = await self._chat(payload)
+        if not content:
+            return None
+        try:
+            data = self._extract_json(content)
+            return self._sanitize_topology_patch(data)
+        except Exception:
+            return None
+
     @staticmethod
     def _build_prompt(requirement: str, features: ExtractedFeatures, candidates: list[CandidateEvaluation]) -> str:
         return (
@@ -229,6 +283,54 @@ class LLMClient:
             f"抽取特征：{features.model_dump_json()}\n"
             f"候选架构：{[item.model_dump() for item in candidates]}\n"
         )
+
+    @staticmethod
+    def _sanitize_topology_patch(data: dict[str, Any]) -> dict[str, Any]:
+        def clean_list(items) -> list[str]:
+            if not isinstance(items, list):
+                return []
+            return [str(item).strip() for item in items if str(item).strip()][:16]
+
+        capabilities = []
+        for item in data.get("capabilities", []):
+            if isinstance(item, dict):
+                name = str(item.get("name", "")).strip()
+                if name:
+                    capabilities.append(
+                        {
+                            "name": name,
+                            "components": clean_list(item.get("components", [])),
+                            "stores": clean_list(item.get("stores", [])),
+                        }
+                    )
+            elif str(item).strip():
+                capabilities.append({"name": str(item).strip(), "components": [], "stores": []})
+
+        edges = []
+        for item in data.get("edges", []):
+            if not isinstance(item, dict):
+                continue
+            source = str(item.get("source", "")).strip()
+            target = str(item.get("target", "")).strip()
+            if not source or not target:
+                continue
+            kind = str(item.get("kind", "sync")).strip()
+            edges.append(
+                {
+                    "source": source,
+                    "target": target,
+                    "label": str(item.get("label", "依赖")).strip() or "依赖",
+                    "kind": "event" if kind == "event" else "sync",
+                }
+            )
+
+        return {
+            "capabilities": capabilities[:12],
+            "components": clean_list(data.get("components", [])),
+            "stores": clean_list(data.get("stores", [])),
+            "edges": edges[:24],
+            "reason": str(data.get("reason", "")).strip()[:160],
+        }
 
     async def _chat(self, payload: dict[str, Any]) -> str | None:
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}

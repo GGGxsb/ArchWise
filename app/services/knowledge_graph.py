@@ -106,6 +106,9 @@ class KnowledgeGraphService:
             "singletons": singleton_result,
         }
 
+    def merge_topology_patch(self, requirement: str, features: ExtractedFeatures, patch: dict[str, object]) -> dict[str, object]:
+        return self.neo4j.merge_topology_patch(requirement, features.keywords, patch)
+
     def retrieve_topology_knowledge(self, requirement: str, features: ExtractedFeatures) -> dict[str, object]:
         if self.neo4j.configured:
             result = self.neo4j.retrieve_topology_knowledge(

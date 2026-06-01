@@ -253,6 +253,7 @@ function renderDecisionTrace(trace) {
       `).join("") : "<p>暂无强匹配架构风格</p>"}
       ${topology.scenarios?.length ? `<p><b>拓扑场景</b>${escapeHtml(topology.scenarios.join("、"))}</p>` : ""}
       ${topology.capabilities?.length ? `<p><b>业务能力</b>${escapeHtml(topology.capabilities.slice(0, 10).join("、"))}</p>` : ""}
+      ${renderTopologyRepair(topology.react_repair || [])}
     </div>
     <div class="decision-section">
       <h3>评分证据</h3>
@@ -275,6 +276,42 @@ function renderDecisionTrace(trace) {
       <p><b>是否组合</b>${trace.composition_evidence?.composition_needed ? "建议组合" : "不建议组合"}</p>
       <p><b>说明</b>${escapeHtml(trace.composition_evidence?.reason || "暂无")}</p>
       ${listItems(trace.composition_evidence?.triggers || [], "暂无组合触发条件")}
+    </div>
+  `;
+}
+
+function renderTopologyRepair(repairTrace) {
+  if (!repairTrace.length) return "";
+  return `
+    <div class="score-evidence">
+      <strong>拓扑 ReAct 补全</strong>
+      ${repairTrace.map((item) => {
+        if (item.action === "coverage_check") {
+          const coverage = item.coverage || {};
+          return `
+            <p><b>第 ${escapeHtml(String(item.round))} 轮覆盖率</b>${escapeHtml(String(coverage.score ?? "未知"))}</p>
+            ${coverage.missing_components?.length ? `<em>缺失：${escapeHtml(coverage.missing_components.slice(0, 8).join("、"))}</em>` : "<em>核心组件覆盖充足</em>"}
+          `;
+        }
+        if (item.action === "llm_patch_merged") {
+          const patch = item.patch || {};
+          const after = item.coverage_after || {};
+          const neo4j = item.neo4j || {};
+          const components = patch.components || [];
+          const capNames = (patch.capabilities || []).map((cap) => cap.name).filter(Boolean);
+          return `
+            <p><b>LLM 补全</b>${escapeHtml(patch.reason || "根据缺失组件补全拓扑知识")}</p>
+            ${components.length ? `<em>新增组件：${escapeHtml(components.slice(0, 8).join("、"))}</em>` : ""}
+            ${capNames.length ? `<em>新增能力：${escapeHtml(capNames.slice(0, 6).join("、"))}</em>` : ""}
+            <p><b>补全后覆盖率</b>${escapeHtml(String(after.score ?? "未知"))}</p>
+            <p><b>Neo4j 写入</b>${neo4j.ok ? "成功" : escapeHtml(neo4j.error || "未写入")}</p>
+          `;
+        }
+        if (item.action === "llm_patch_unavailable") {
+          return `<p><b>LLM 补全</b>${escapeHtml(item.message || "不可用")}</p>`;
+        }
+        return "";
+      }).join("")}
     </div>
   `;
 }

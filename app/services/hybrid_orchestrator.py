@@ -32,6 +32,9 @@ class ReasoningContext:
 class HybridReasoningOrchestrator:
     """LangChain-style chain orchestration for rules + LLM + knowledge graph reasoning."""
 
+    TOPOLOGY_COVERAGE_THRESHOLD = 0.75
+    TOPOLOGY_REPAIR_MAX_ROUNDS = 2
+
     def __init__(
         self,
         parser: RequirementParserAgent,
@@ -196,6 +199,12 @@ class HybridReasoningOrchestrator:
     ) -> dict[str, str]:
         llm_capabilities = await self.llm_client.extract_capabilities(ctx.requirement, features)
         graph_knowledge = self.graph_service.retrieve_topology_knowledge(ctx.requirement, features)
+        graph_knowledge, repair_trace = await self._repair_topology_knowledge(
+            ctx,
+            features,
+            graph_knowledge,
+            llm_capabilities,
+        )
         mermaid, notes = self.topology_generator.generate(
             ctx.requirement,
             features,
@@ -216,10 +225,80 @@ class HybridReasoningOrchestrator:
             "components": graph_knowledge.get("components", []),
             "stores": graph_knowledge.get("stores", []),
             "notes": notes,
+            "react_repair": repair_trace,
         }
         ctx.trace.extend(notes)
         ctx.trace.append("拓扑生成器基于领域能力和规则校验生成确定性 Mermaid 拓扑")
         return {f"{candidates[0].name}定制拓扑": mermaid}
+
+    async def _repair_topology_knowledge(
+        self,
+        ctx: ReasoningContext,
+        features: ExtractedFeatures,
+        graph_knowledge: dict,
+        llm_capabilities: list[str],
+    ) -> tuple[dict, list[dict[str, Any]]]:
+        repair_trace: list[dict[str, Any]] = []
+        current_graph = graph_knowledge
+        for round_index in range(1, self.TOPOLOGY_REPAIR_MAX_ROUNDS + 1):
+            coverage = self.topology_generator.assess_coverage(
+                ctx.requirement,
+                features,
+                current_graph,
+                extra_capabilities=llm_capabilities,
+            )
+            repair_trace.append(
+                {
+                    "round": round_index,
+                    "action": "coverage_check",
+                    "coverage": coverage,
+                }
+            )
+            if coverage["score"] >= self.TOPOLOGY_COVERAGE_THRESHOLD or not coverage["missing_components"]:
+                break
+
+            patch = await self.llm_client.propose_topology_knowledge_patch(
+                ctx.requirement,
+                features,
+                coverage,
+                current_graph,
+            )
+            if not patch:
+                repair_trace.append(
+                    {
+                        "round": round_index,
+                        "action": "llm_patch_unavailable",
+                        "message": "DeepSeek 未配置、调用失败或返回格式不合法，保留规则自补全。",
+                    }
+                )
+                break
+
+            current_graph = self.topology_generator.merge_knowledge_patch(current_graph, patch)
+            neo4j_result = self.graph_service.merge_topology_patch(ctx.requirement, features, patch)
+            refreshed_coverage = self.topology_generator.assess_coverage(
+                ctx.requirement,
+                features,
+                current_graph,
+                extra_capabilities=llm_capabilities,
+            )
+            repair_trace.append(
+                {
+                    "round": round_index,
+                    "action": "llm_patch_merged",
+                    "patch": patch,
+                    "neo4j": neo4j_result,
+                    "coverage_after": refreshed_coverage,
+                }
+            )
+            ctx.trace.append(
+                "拓扑 ReAct 补全：覆盖率 "
+                f"{coverage['score']} -> {refreshed_coverage['score']}，"
+                f"补充组件 {', '.join(patch.get('components', [])[:6]) or '见能力映射'}"
+            )
+            if refreshed_coverage["score"] >= self.TOPOLOGY_COVERAGE_THRESHOLD:
+                break
+
+        return current_graph, repair_trace
 
     async def _analyze(self, ctx: ReasoningContext):
         ctx.trace.append("需求解析 Agent 接收自然语言需求")

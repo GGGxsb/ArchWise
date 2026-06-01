@@ -100,6 +100,30 @@ class Neo4jAuraService:
 
         return {"ok": True, "singletons_synced": len(singletons)}
 
+    def merge_topology_patch(self, requirement: str, keywords: list[str], patch: dict[str, Any]) -> dict[str, Any]:
+        if not self.configured:
+            return {"ok": False, "error": "Neo4j AuraDB is not configured."}
+
+        scenario_ids = self._match_domain_scenarios(requirement, keywords)
+        if not scenario_ids:
+            scenario_ids = ["llm_learned"]
+        scenario_name = patch.get("scenario_name") or "LLM 补全场景"
+        try:
+            with self._driver() as driver:
+                with driver.session(database=self.database) as session:
+                    self._create_constraints(session)
+                    session.execute_write(self._merge_topology_patch, scenario_ids, scenario_name, patch)
+            return {
+                "ok": True,
+                "scenario_ids": scenario_ids,
+                "capabilities": len(patch.get("capabilities", [])),
+                "components": len(patch.get("components", [])),
+                "stores": len(patch.get("stores", [])),
+                "edges": len(patch.get("edges", [])),
+            }
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
     def retrieve_topology_knowledge(self, requirement: str, keywords: list[str], qualities: dict[str, float]) -> dict[str, Any]:
         if not self.configured:
             return {"components": [], "stores": [], "edges": [], "scenarios": [], "capabilities": []}
@@ -379,6 +403,84 @@ class Neo4jAuraService:
                 target_layer=component_layers.get(target, "业务服务层"),
                 source_singleton=source in singleton_components,
                 target_singleton=target in singleton_components,
+            )
+
+    @staticmethod
+    def _merge_topology_patch(tx, scenario_ids: list[str], scenario_name: str, patch: dict[str, Any]) -> None:
+        for scenario_id in scenario_ids:
+            tx.run(
+                """
+                MERGE (s:DomainScenario {id: $id})
+                SET s.name = coalesce(s.name, $name)
+                """,
+                id=scenario_id,
+                name=scenario_name,
+            )
+
+        component_names = set(patch.get("components", []))
+        store_names = set(patch.get("stores", []))
+        for capability in patch.get("capabilities", []):
+            if not isinstance(capability, dict) or not capability.get("name"):
+                continue
+            capability_name = capability["name"]
+            component_names.update(capability.get("components", []))
+            store_names.update(capability.get("stores", []))
+            tx.run("MERGE (:BusinessCapability {name: $name})", name=capability_name)
+            for scenario_id in scenario_ids:
+                tx.run(
+                    """
+                    MATCH (s:DomainScenario {id: $scenario_id})
+                    MATCH (c:BusinessCapability {name: $capability})
+                    MERGE (s)-[:REQUIRES]->(c)
+                    """,
+                    scenario_id=scenario_id,
+                    capability=capability_name,
+                )
+            for component_name in capability.get("components", []):
+                tx.run(
+                    """
+                    MATCH (c:BusinessCapability {name: $capability})
+                    MERGE (component:ArchitectureComponent {name: $component})
+                    MERGE (c)-[:IMPLEMENTED_BY]->(component)
+                    """,
+                    capability=capability_name,
+                    component=component_name,
+                )
+            for store_name in capability.get("stores", []):
+                tx.run(
+                    """
+                    MATCH (c:BusinessCapability {name: $capability})
+                    MERGE (store:DataStore {name: $store})
+                    MERGE (c)-[:USES_STORE]->(store)
+                    WITH c, store
+                    MATCH (component:ArchitectureComponent)<-[:IMPLEMENTED_BY]-(c)
+                    MERGE (component)-[:STORES_IN]->(store)
+                    """,
+                    capability=capability_name,
+                    store=store_name,
+                )
+
+        for component_name in component_names:
+            tx.run("MERGE (:ArchitectureComponent {name: $name})", name=component_name)
+        for store_name in store_names:
+            tx.run("MERGE (:DataStore {name: $name})", name=store_name)
+
+        for edge in patch.get("edges", []):
+            source = edge.get("source")
+            target = edge.get("target")
+            if not source or not target:
+                continue
+            tx.run(
+                """
+                MERGE (a:ArchitectureComponent {name: $source})
+                MERGE (b:ArchitectureComponent {name: $target})
+                MERGE (a)-[r:DEPENDS_ON]->(b)
+                SET r.label = $label, r.kind = $kind
+                """,
+                source=source,
+                target=target,
+                label=edge.get("label", "依赖"),
+                kind=edge.get("kind", "sync"),
             )
 
     @staticmethod

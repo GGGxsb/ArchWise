@@ -24,6 +24,33 @@ class TopologyEdge:
 class TopologyGenerator:
     """Deterministic topology generator based on capabilities and rules."""
 
+    COVERAGE_COMPONENT_RULES = {
+        "商品": ["商品服务"],
+        "商品浏览": ["商品服务", "搜索索引"],
+        "购物车": ["购物车服务", "购物车缓存"],
+        "下单": ["订单服务"],
+        "订单": ["订单服务", "订单库"],
+        "支付": ["支付服务", "支付库"],
+        "库存": ["库存服务", "库存库"],
+        "秒杀": ["秒杀服务", "缓存集群", "事件总线"],
+        "促销": ["促销服务", "缓存集群"],
+        "物流": ["物流服务", "物流库"],
+        "退款": ["退款服务"],
+        "灰度": ["配置中心", "服务注册"],
+        "高可用": ["监控服务", "审计服务"],
+        "直播": ["直播服务", "直播网关", "CDN"],
+        "录播": ["回放服务", "转码服务", "对象存储"],
+        "课程": ["课程服务", "课程库"],
+        "互动": ["互动服务", "互动库"],
+        "消息": ["消息服务", "消息库", "事件总线"],
+        "视频通话": ["信令服务", "媒体服务", "对象存储"],
+        "内容推荐": ["推荐服务", "特征库"],
+        "发帖": ["内容服务", "内容库"],
+        "评论": ["评论服务", "内容库"],
+        "私信": ["私信服务", "消息库"],
+        "点赞": ["互动服务", "互动库"],
+    }
+
     CANONICAL_COMPONENT_IDS = {
         "客户端": "client",
         "CDN": "cdn",
@@ -127,6 +154,73 @@ class TopologyGenerator:
         nodes, edges, notes = self._build_graph(capabilities, features, winner, graph_knowledge, composition_recommendation)
         return self._render_mermaid(nodes, edges), notes
 
+    def assess_coverage(
+        self,
+        requirement: str,
+        features: ExtractedFeatures,
+        graph_knowledge: dict,
+        extra_capabilities: list[str] | None = None,
+    ) -> dict:
+        expected = self._expected_components(requirement, features, extra_capabilities or [])
+        if not expected:
+            return {"score": 1.0, "expected_components": [], "covered_components": [], "missing_components": []}
+
+        available_names = set(graph_knowledge.get("components", [])) | set(graph_knowledge.get("stores", []))
+        available_names |= set(graph_knowledge.get("capabilities", []))
+        covered = [name for name in expected if name in available_names]
+        missing = [name for name in expected if name not in available_names]
+        score = round(len(covered) / len(expected), 2)
+        return {
+            "score": score,
+            "expected_components": expected,
+            "covered_components": covered,
+            "missing_components": missing,
+        }
+
+    def merge_knowledge_patch(self, graph_knowledge: dict, patch: dict) -> dict:
+        merged = {
+            "components": list(graph_knowledge.get("components", [])),
+            "stores": list(graph_knowledge.get("stores", [])),
+            "edges": list(graph_knowledge.get("edges", [])),
+            "scenarios": list(graph_knowledge.get("scenarios", [])),
+            "capabilities": list(graph_knowledge.get("capabilities", [])),
+        }
+        for capability in patch.get("capabilities", []):
+            name = str(capability.get("name", "")).strip() if isinstance(capability, dict) else str(capability).strip()
+            if name:
+                merged["capabilities"].append(name)
+            if isinstance(capability, dict):
+                merged["components"].extend(str(item).strip() for item in capability.get("components", []) if str(item).strip())
+                merged["stores"].extend(str(item).strip() for item in capability.get("stores", []) if str(item).strip())
+        merged["components"].extend(str(item).strip() for item in patch.get("components", []) if str(item).strip())
+        merged["stores"].extend(str(item).strip() for item in patch.get("stores", []) if str(item).strip())
+        for edge in patch.get("edges", []):
+            if not isinstance(edge, dict):
+                continue
+            source = str(edge.get("source", "")).strip()
+            target = str(edge.get("target", "")).strip()
+            if source and target:
+                merged["edges"].append(
+                    {
+                        "source": source,
+                        "target": target,
+                        "label": str(edge.get("label", "依赖")).strip() or "依赖",
+                        "kind": str(edge.get("kind", "sync")).strip() or "sync",
+                    }
+                )
+        for key in ["components", "stores", "scenarios", "capabilities"]:
+            merged[key] = list(dict.fromkeys(merged[key]))
+        seen_edges = set()
+        deduped_edges = []
+        for edge in merged["edges"]:
+            key = (edge.get("source"), edge.get("target"), edge.get("label"), edge.get("kind"))
+            if key in seen_edges:
+                continue
+            seen_edges.add(key)
+            deduped_edges.append(edge)
+        merged["edges"] = deduped_edges
+        return merged
+
     def extract_capabilities(self, requirement: str, features: ExtractedFeatures) -> list[str]:
         text = requirement + " " + " ".join(features.keywords) + " " + features.domain
         capabilities: list[str] = []
@@ -154,6 +248,21 @@ class TopologyGenerator:
             capabilities.extend(["用户", "业务", "数据库"])
 
         return list(dict.fromkeys(capabilities))
+
+    def _expected_components(self, requirement: str, features: ExtractedFeatures, extra_capabilities: list[str]) -> list[str]:
+        text = requirement + " " + features.domain + " " + " ".join(features.keywords) + " " + " ".join(extra_capabilities)
+        expected: list[str] = []
+        for keyword, components in self.COVERAGE_COMPONENT_RULES.items():
+            if keyword in text:
+                expected.extend(components)
+        qualities = features.quality_attributes
+        if qualities.get("concurrency", 0) >= 0.75:
+            expected.extend(["负载均衡", "缓存集群", "事件总线"])
+        if qualities.get("reliability", 0) >= 0.7:
+            expected.extend(["监控服务"])
+        if qualities.get("scalability", 0) >= 0.7:
+            expected.extend(["服务注册"])
+        return list(dict.fromkeys(expected))
 
     def _build_graph(
         self,
