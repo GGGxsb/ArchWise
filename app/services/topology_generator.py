@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 import hashlib
 from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
 
 from app.models.schemas import CandidateEvaluation, ExtractedFeatures
 
@@ -22,34 +25,7 @@ class TopologyEdge:
 
 
 class TopologyGenerator:
-    """Deterministic topology generator based on capabilities and rules."""
-
-    COVERAGE_COMPONENT_RULES = {
-        "商品": ["商品服务"],
-        "商品浏览": ["商品服务", "搜索索引"],
-        "购物车": ["购物车服务", "购物车缓存"],
-        "下单": ["订单服务"],
-        "订单": ["订单服务", "订单库"],
-        "支付": ["支付服务", "支付库"],
-        "库存": ["库存服务", "库存库"],
-        "秒杀": ["秒杀服务", "缓存集群", "事件总线"],
-        "促销": ["促销服务", "缓存集群"],
-        "物流": ["物流服务", "物流库"],
-        "退款": ["退款服务"],
-        "灰度": ["配置中心", "服务注册"],
-        "高可用": ["监控服务", "审计服务"],
-        "直播": ["直播服务", "直播网关", "CDN"],
-        "录播": ["回放服务", "转码服务", "对象存储"],
-        "课程": ["课程服务", "课程库"],
-        "互动": ["互动服务", "互动库"],
-        "消息": ["消息服务", "消息库", "事件总线"],
-        "视频通话": ["信令服务", "媒体服务", "对象存储"],
-        "内容推荐": ["推荐服务", "特征库"],
-        "发帖": ["内容服务", "内容库"],
-        "评论": ["评论服务", "内容库"],
-        "私信": ["私信服务", "消息库"],
-        "点赞": ["互动服务", "互动库"],
-    }
+    """Topology renderer driven by LLM features, Neo4j knowledge, and schema checks."""
 
     CANONICAL_COMPONENT_IDS = {
         "客户端": "client",
@@ -118,6 +94,15 @@ class TopologyGenerator:
         "服务注册": "service_registry",
         "监控服务": "monitoring",
         "审计服务": "audit",
+        "实验人员服务": "lab_user",
+        "试剂申领服务": "reagent_request",
+        "申领审核服务": "approval",
+        "试剂库存服务": "reagent_inventory",
+        "出库服务": "stock_out",
+        "采购提醒服务": "purchase_alert",
+        "试剂库": "reagent_db",
+        "申领记录库": "request_db",
+        "出库记录库": "stock_out_db",
     }
 
     SINGLETON_COMPONENTS = {
@@ -129,7 +114,8 @@ class TopologyGenerator:
     SOCIAL_KEYWORDS = ["社交", "发帖", "点赞", "评论", "私信", "内容推荐", "关注", "粉丝"]
     EDUCATION_KEYWORDS = ["在线教育", "上课", "课程", "直播", "录播", "回放", "课后互动", "作业", "考试", "课堂"]
     MEDIA_KEYWORDS = ["视频", "图片", "短视频", "转码", "直播", "录播"]
-    COMMERCE_KEYWORDS = ["电商", "商品", "购物车", "订单", "支付", "退款", "库存", "促销", "下单", "秒杀", "物流", "灰度"]
+    COMMERCE_KEYWORDS = ["电商", "商品", "购物车", "订单", "支付", "退款", "促销", "下单", "秒杀", "物流", "灰度", "交易"]
+    LAB_REAGENT_KEYWORDS = ["实验室", "试剂", "申领", "领用", "出库", "采购"]
     IOT_KEYWORDS = ["设备", "传感器", "采集", "告警", "远程控制"]
     AI_KEYWORDS = ["AI", "智能", "推荐算法", "生成", "大模型"]
 
@@ -154,6 +140,53 @@ class TopologyGenerator:
         nodes, edges, notes = self._build_graph(capabilities, features, winner, graph_knowledge, composition_recommendation)
         return self._render_mermaid(nodes, edges), notes
 
+    def generate_views(
+        self,
+        requirement: str,
+        features: ExtractedFeatures,
+        winner: CandidateEvaluation,
+        extra_capabilities: list[str] | None = None,
+        graph_knowledge: dict | None = None,
+        composition_recommendation: dict | None = None,
+    ) -> tuple[dict[str, str], list[str]]:
+        graph_knowledge = graph_knowledge or {}
+        composition_recommendation = composition_recommendation or {}
+        graph_primary = self._has_graph_knowledge(graph_knowledge)
+        if graph_primary:
+            capabilities = list(graph_knowledge.get("capabilities", []))
+        else:
+            capabilities = self.extract_capabilities(requirement, features)
+        capabilities.extend(extra_capabilities or [])
+        capabilities = list(dict.fromkeys(capabilities))
+        nodes, edges, notes = self._build_graph(capabilities, features, winner, graph_knowledge, composition_recommendation)
+        views = self._build_view_diagrams(nodes, edges)
+        notes.append("拓扑可视化：已生成总览、完整、业务链路、数据流和支撑设施多视图")
+        return views, notes
+
+    def generate_graph_views(
+        self,
+        requirement: str,
+        features: ExtractedFeatures,
+        winner: CandidateEvaluation,
+        extra_capabilities: list[str] | None = None,
+        graph_knowledge: dict | None = None,
+        composition_recommendation: dict | None = None,
+    ) -> tuple[dict[str, str], dict[str, dict], list[str]]:
+        graph_knowledge = graph_knowledge or {}
+        composition_recommendation = composition_recommendation or {}
+        graph_primary = self._has_graph_knowledge(graph_knowledge)
+        if graph_primary:
+            capabilities = list(graph_knowledge.get("capabilities", []))
+        else:
+            capabilities = self.extract_capabilities(requirement, features)
+        capabilities.extend(extra_capabilities or [])
+        capabilities = list(dict.fromkeys(capabilities))
+        nodes, edges, notes = self._build_graph(capabilities, features, winner, graph_knowledge, composition_recommendation)
+        diagrams = self._build_view_diagrams(nodes, edges)
+        graphs = self._build_structured_view_graphs(nodes, edges)
+        notes.append("拓扑可视化：已生成结构化 JSON 拓扑，前端可直接渲染可拖拽节点和连线")
+        return diagrams, graphs, notes
+
     def assess_coverage(
         self,
         requirement: str,
@@ -161,20 +194,79 @@ class TopologyGenerator:
         graph_knowledge: dict,
         extra_capabilities: list[str] | None = None,
     ) -> dict:
-        expected = self._expected_components(requirement, features, extra_capabilities or [])
+        expected = self.extract_business_capabilities(requirement, features, extra_capabilities or [])
         if not expected:
-            return {"score": 1.0, "expected_components": [], "covered_components": [], "missing_components": []}
+            return {
+                "score": 1.0,
+                "dimensions": {},
+                "expected_capabilities": [],
+                "covered_capabilities": [],
+                "missing_capabilities": [],
+                "expected_components": [],
+                "covered_components": [],
+                "missing_components": [],
+                "expected_relations": [],
+                "covered_relations": [],
+                "missing_relations": [],
+                "expected_quality_infrastructure": [],
+                "covered_quality_infrastructure": [],
+                "missing_quality_infrastructure": [],
+            }
 
         available_names = set(graph_knowledge.get("components", [])) | set(graph_knowledge.get("stores", []))
         available_names |= set(graph_knowledge.get("capabilities", []))
         covered = [name for name in expected if name in available_names]
         missing = [name for name in expected if name not in available_names]
-        score = round(len(covered) / len(expected), 2)
+        expected_components = self._expected_components(expected, features)
+        covered_components = [name for name in expected_components if name in available_names]
+        missing_components = [name for name in expected_components if name not in available_names]
+        expected_relations = self._expected_relations(expected_components, features)
+        available_relations = {
+            f"{edge.get('source')}->{edge.get('target')}"
+            for edge in graph_knowledge.get("edges", [])
+            if isinstance(edge, dict) and edge.get("source") and edge.get("target")
+        }
+        covered_relations = [relation for relation in expected_relations if relation in available_relations]
+        missing_relations = [relation for relation in expected_relations if relation not in available_relations]
+        expected_quality_infra = self._expected_quality_infrastructure(features)
+        covered_quality_infra = [name for name in expected_quality_infra if name in available_names]
+        missing_quality_infra = [name for name in expected_quality_infra if name not in available_names]
+
+        dimensions = {
+            "business_capability": self._dimension_score(expected, covered, missing),
+            "component": self._dimension_score(expected_components, covered_components, missing_components),
+            "relation": self._dimension_score(expected_relations, covered_relations, missing_relations),
+            "quality_infrastructure": self._dimension_score(expected_quality_infra, covered_quality_infra, missing_quality_infra),
+            "architecture_responsibility": {
+                "score": 1.0,
+                "expected": [],
+                "covered": [],
+                "missing": [],
+            },
+        }
+        score = round(
+            dimensions["business_capability"]["score"] * 0.35
+            + dimensions["component"]["score"] * 0.25
+            + dimensions["relation"]["score"] * 0.20
+            + dimensions["quality_infrastructure"]["score"] * 0.15
+            + dimensions["architecture_responsibility"]["score"] * 0.05,
+            2,
+        )
         return {
             "score": score,
-            "expected_components": expected,
-            "covered_components": covered,
-            "missing_components": missing,
+            "dimensions": dimensions,
+            "expected_capabilities": expected,
+            "covered_capabilities": covered,
+            "missing_capabilities": missing,
+            "expected_components": expected_components,
+            "covered_components": covered_components,
+            "missing_components": missing_components,
+            "expected_relations": expected_relations,
+            "covered_relations": covered_relations,
+            "missing_relations": missing_relations,
+            "expected_quality_infrastructure": expected_quality_infra,
+            "covered_quality_infrastructure": covered_quality_infra,
+            "missing_quality_infrastructure": missing_quality_infra,
         }
 
     def merge_knowledge_patch(self, graph_knowledge: dict, patch: dict) -> dict:
@@ -222,47 +314,147 @@ class TopologyGenerator:
         return merged
 
     def extract_capabilities(self, requirement: str, features: ExtractedFeatures) -> list[str]:
-        text = requirement + " " + " ".join(features.keywords) + " " + features.domain
-        capabilities: list[str] = []
+        return self.extract_business_capabilities(requirement, features, [])
 
-        if any(keyword in text for keyword in self.SOCIAL_KEYWORDS):
-            capabilities.extend(["社交", "用户", "内容", "互动", "评论", "私信", "Feed", "关系", "推荐", "审核"])
-        if any(keyword in text for keyword in self.EDUCATION_KEYWORDS):
-            capabilities.extend(["教育", "用户", "课程", "直播", "录播", "互动", "作业", "考试", "通知", "媒体", "CDN"])
-        if any(keyword in text for keyword in self.MEDIA_KEYWORDS):
-            capabilities.extend(["媒体", "对象存储", "转码", "CDN"])
-        if any(keyword in text for keyword in self.COMMERCE_KEYWORDS):
-            capabilities.extend(["电商", "商品", "购物车", "订单", "支付", "库存", "促销", "秒杀", "物流", "退款", "风控", "灰度"])
-        if any(keyword in text for keyword in self.IOT_KEYWORDS):
-            capabilities.extend(["设备", "采集", "告警", "控制"])
-        if any(keyword in text for keyword in self.AI_KEYWORDS) or features.quality_attributes.get("ai_reasoning", 0) >= 0.6:
-            capabilities.extend(["AI", "特征", "模型"])
+    def extract_business_capabilities(
+        self,
+        requirement: str,
+        features: ExtractedFeatures,
+        extra_capabilities: list[str],
+    ) -> list[str]:
+        llm_caps = [item for item in features.business_capabilities if item and not self._is_generic_capability(item)]
+        extra_caps = [item for item in extra_capabilities if item and not self._is_generic_capability(item)]
+        merged = list(dict.fromkeys(llm_caps + extra_caps))
+        return merged
 
-        if features.quality_attributes.get("concurrency", 0) >= 0.65:
-            capabilities.extend(["负载均衡", "缓存", "消息队列"])
-        if features.quality_attributes.get("realtime", 0) >= 0.65 or features.data_flow == "event_stream":
-            capabilities.extend(["事件总线", "通知"])
-        if features.quality_attributes.get("data_intensity", 0) >= 0.6 or features.data_flow == "pipeline":
-            capabilities.extend(["数据管道", "分析"])
-        if not capabilities:
-            capabilities.extend(["用户", "业务", "数据库"])
+    @staticmethod
+    def _is_generic_capability(name: str) -> bool:
+        generic = {"业务处理", "数据处理", "消息处理", "系统管理", "服务处理", "通用能力"}
+        return name.strip() in generic
 
-        return list(dict.fromkeys(capabilities))
+    @staticmethod
+    def _keyword_business_capabilities(text: str) -> list[str]:
+        rules = {
+            "商品浏览": ["商品浏览", "商品", "浏览", "搜索"],
+            "购物车": ["购物车"],
+            "订单管理": ["订单", "下单"],
+            "支付结算": ["支付", "结算"],
+            "库存管理": ["库存"],
+            "库存一致性": ["最终一致性", "一致性"],
+            "促销活动": ["促销"],
+            "秒杀活动": ["秒杀"],
+            "物流跟踪": ["物流", "轨迹"],
+            "退款售后": ["退款", "售后"],
+            "风控审计": ["风控", "审计", "安全"],
+            "灰度发布": ["灰度", "独立部署", "发布"],
+            "通知提醒": ["通知", "提醒"],
+            "商品管理": ["商品管理"],
+            "直播教学": ["直播"],
+            "录播回放": ["录播", "回放"],
+            "课堂互动": ["互动"],
+            "作业考试": ["作业", "考试"],
+            "内容发布": ["发帖", "内容发布"],
+            "互动行为": ["点赞", "评论", "互动"],
+            "私信通信": ["私信"],
+            "关注关系": ["关注", "关系"],
+            "信息流": ["信息流", "Feed", "推荐"],
+            "内容推荐": ["推荐算法", "内容推荐", "推荐"],
+            "内容审核": ["审核"],
+        }
+        result: list[str] = []
+        for capability, keywords in rules.items():
+            if any(keyword in text for keyword in keywords):
+                result.append(capability)
+        return result
 
-    def _expected_components(self, requirement: str, features: ExtractedFeatures, extra_capabilities: list[str]) -> list[str]:
-        text = requirement + " " + features.domain + " " + " ".join(features.keywords) + " " + " ".join(extra_capabilities)
+    @classmethod
+    def _components_for_capabilities(cls, capabilities: list[str]) -> list[str]:
+        spec = cls._domain_topology_spec()
+        capability_map = spec.get("capabilities", {})
+        expected_components: list[str] = []
+        for capability in capabilities:
+            item = capability_map.get(capability)
+            if not item:
+                continue
+            expected_components.extend(item.get("components", []))
+            expected_components.extend(item.get("stores", []))
+        return list(dict.fromkeys(expected_components))
+
+    @classmethod
+    def _expected_components(cls, capabilities: list[str], features: ExtractedFeatures) -> list[str]:
+        expected_components = cls._components_for_capabilities(capabilities)
+        expectations = features.topology_expectations or {}
+        for name in expectations.get("must_have_components", []):
+            if str(name).strip():
+                expected_components.append(str(name).strip())
+        return list(dict.fromkeys(expected_components))
+
+    @classmethod
+    def _expected_relations(cls, expected_components: list[str], features: ExtractedFeatures) -> list[str]:
+        expected_set = set(expected_components)
+        relations: list[str] = []
+        expectations = features.topology_expectations or {}
+        for relation in expectations.get("must_have_relations", []):
+            if "->" in str(relation):
+                relations.append(str(relation).strip())
+
+        spec = cls._domain_topology_spec()
+        for source, target, _label in spec.get("dependencies", []):
+            if source.startswith("*") or target.startswith("*"):
+                continue
+            if source in expected_set and target in expected_set:
+                relations.append(f"{source}->{target}")
+        return list(dict.fromkeys(relations))
+
+    @classmethod
+    def _expected_quality_infrastructure(cls, features: ExtractedFeatures) -> list[str]:
+        spec = cls._domain_topology_spec()
         expected: list[str] = []
-        for keyword, components in self.COVERAGE_COMPONENT_RULES.items():
-            if keyword in text:
-                expected.extend(components)
-        qualities = features.quality_attributes
-        if qualities.get("concurrency", 0) >= 0.75:
-            expected.extend(["负载均衡", "缓存集群", "事件总线"])
-        if qualities.get("reliability", 0) >= 0.7:
-            expected.extend(["监控服务"])
-        if qualities.get("scalability", 0) >= 0.7:
-            expected.extend(["服务注册"])
+        for quality, score in features.quality_attributes.items():
+            if score >= 0.65:
+                expected.extend(spec.get("quality_components", {}).get(quality, []))
+        expectations = features.topology_expectations or {}
+        expected.extend(str(item).strip() for item in expectations.get("quality_infrastructure", []) if str(item).strip())
         return list(dict.fromkeys(expected))
+
+    @staticmethod
+    def _dimension_score(expected: list[str], covered: list[str], missing: list[str]) -> dict:
+        if not expected:
+            score = 1.0
+        else:
+            score = round(len(covered) / len(expected), 2)
+        return {
+            "score": score,
+            "expected": expected,
+            "covered": covered,
+            "missing": missing,
+        }
+
+    @classmethod
+    def _scenario_capabilities(cls, text: str, domain: str) -> list[str]:
+        spec = cls._domain_topology_spec()
+        result: list[str] = []
+        if domain:
+            for scenario in spec.get("scenarios", []):
+                scenario_text = " ".join([scenario.get("id", ""), scenario.get("name", ""), " ".join(scenario.get("keywords", []))])
+                if domain == scenario.get("name") or domain in scenario_text:
+                    return list(dict.fromkeys(scenario.get("capabilities", [])))
+
+        scored_scenarios: list[tuple[int, list[str]]] = []
+        for scenario in spec.get("scenarios", []):
+            hits = sum(1 for keyword in scenario.get("keywords", []) if keyword in text)
+            if hits >= 2:
+                scored_scenarios.append((hits, scenario.get("capabilities", [])))
+        if scored_scenarios:
+            scored_scenarios.sort(key=lambda item: item[0], reverse=True)
+            result.extend(scored_scenarios[0][1])
+        return list(dict.fromkeys(result))
+
+    @staticmethod
+    @lru_cache(maxsize=1)
+    def _domain_topology_spec() -> dict:
+        path = Path(__file__).resolve().parents[2] / "data" / "domain_topology.json"
+        return json.loads(path.read_text(encoding="utf-8"))
 
     def _build_graph(
         self,
@@ -294,21 +486,23 @@ class TopologyGenerator:
         if graph_primary:
             notes.append("拓扑生成策略：Neo4j 图谱作为主知识源，本地规则仅执行校验、补齐和去重")
             self._apply_graph_knowledge(graph_knowledge, nodes, edges, add, link, notes)
+            self._add_llm_capability_nodes(capabilities, add)
             self._ensure_quality_infrastructure(features, add, notes)
         else:
-            notes.append("拓扑生成策略：Neo4j 未命中，启用本地规则兜底生成基础拓扑")
-            self._add_local_capability_nodes(capabilities, add)
+            notes.append("拓扑生成策略：Neo4j 未命中，使用 DeepSeek 拓扑期望生成基础拓扑")
+            self._add_llm_capability_nodes(capabilities, add)
+            self._add_llm_expected_nodes(features, add)
 
         self._connect_common(nodes, edges, link)
         if graph_primary:
             self._connect_graph_services(nodes, edges, link, notes)
         else:
-            self._validate_social(capabilities, nodes, add, link, notes)
-            self._validate_education(capabilities, nodes, add, link, notes)
-            self._validate_commerce(capabilities, nodes, add, link, notes)
-        self._validate_and_repair_topology(capabilities, features, nodes, add, link, notes)
+            self._connect_llm_expected_topology(features, nodes, link, notes)
+        self._validate_and_repair_topology(capabilities, features, nodes, add, link, notes, graph_primary)
         nodes, edges = self._dedupe_graph(nodes, edges, notes)
-        self._apply_composition_responsibilities(nodes, edges, winner, composition_recommendation, notes)
+        nodes, edges = self._prune_irrelevant_topology(capabilities, features, graph_knowledge, nodes, edges, notes)
+        if composition_recommendation.get("composition_needed"):
+            notes.append("拓扑生成约束：组合推荐仅用于报告说明，架构图只展示最终推荐架构下的系统拓扑")
 
         return list(nodes.values()), edges, notes
 
@@ -512,6 +706,48 @@ class TopologyGenerator:
         if "灰度" in capabilities:
             add("config_center", "配置中心", "治理层")
             add("service_registry", "服务注册", "治理层")
+
+    def _add_llm_expected_nodes(self, features: ExtractedFeatures, add) -> None:
+        expectations = features.topology_expectations or {}
+        for name in expectations.get("must_have_components", []):
+            clean_name = str(name).strip()
+            if clean_name:
+                add(self._component_id(clean_name), clean_name, self._component_layer(clean_name))
+
+    def _add_llm_capability_nodes(self, capabilities: list[str], add) -> None:
+        capability_map = self._domain_topology_spec().get("capabilities", {})
+        for capability in capabilities:
+            item = capability_map.get(capability)
+            if not item:
+                continue
+            for component in item.get("components", []):
+                add(self._component_id(component), component, self._component_layer(component))
+            for store in item.get("stores", []):
+                add(self._component_id(store), store, "数据层")
+
+    def _connect_llm_expected_topology(
+        self,
+        features: ExtractedFeatures,
+        nodes: dict[str, TopologyNode],
+        link,
+        notes: list[str],
+    ) -> None:
+        expectations = features.topology_expectations or {}
+        for relation in expectations.get("must_have_relations", []):
+            text = str(relation).strip()
+            if "->" not in text:
+                continue
+            source, target = [part.strip() for part in text.split("->", 1)]
+            if source and target:
+                link(self._component_id(source), self._component_id(target), "依赖")
+
+        service_nodes = [
+            node_id for node_id, node in nodes.items()
+            if node.layer == "业务服务层"
+        ]
+        for service in service_nodes:
+            link("gateway", service, "API")
+        notes.append("拓扑连接：已按 DeepSeek must_have_relations 和服务入口建立基础链路")
 
     def _apply_graph_knowledge(self, graph_knowledge, nodes, edges, add, link, notes) -> None:
         components = graph_knowledge.get("components", [])
@@ -793,20 +1029,8 @@ class TopologyGenerator:
         if "config_center" in nodes and "service_registry" in nodes:
             link("config_center", "service_registry", "灰度配置")
 
-    def _validate_and_repair_topology(self, capabilities, features, nodes, add, link, notes) -> None:
+    def _validate_and_repair_topology(self, capabilities, features, nodes, add, link, notes, graph_primary: bool) -> None:
         repairs = []
-        capability_text = " ".join(capabilities)
-        if any(item in capability_text for item in ["电商", "商品", "购物车", "订单", "支付", "库存", "秒杀", "物流"]):
-            before = set(nodes)
-            self._validate_commerce(capabilities, nodes, add, link, notes)
-            repairs.extend(node_id for node_id in nodes if node_id not in before)
-            expected = ["product", "cart", "order", "payment", "inventory"]
-            covered = sum(1 for node_id in expected if node_id in nodes)
-            if covered < len(expected):
-                notes.append(f"拓扑自检：电商核心能力覆盖率 {covered}/{len(expected)}，已触发自补全")
-            else:
-                notes.append(f"拓扑自检：电商核心能力覆盖率 {covered}/{len(expected)}")
-
         qualities = features.quality_attributes
         if qualities.get("concurrency", 0) >= 0.75:
             for node_id, name, layer in [("lb", "负载均衡", "接入层"), ("cache", "缓存集群", "数据层"), ("event_bus", "事件总线", "异步事件层")]:
@@ -823,8 +1047,175 @@ class TopologyGenerator:
             add("service_registry", "服务注册", "治理层")
             repairs.append("service_registry")
 
+        commerce_caps = {"商品浏览", "商品管理", "购物车", "订单管理", "支付结算", "库存管理", "库存一致性", "秒杀活动", "物流跟踪"}
+        if commerce_caps & set(capabilities):
+            expected = ["product", "cart", "order", "payment", "inventory"]
+            covered = sum(1 for node_id in expected if node_id in nodes)
+            notes.append(f"拓扑自检：电商核心能力覆盖率 {covered}/{len(expected)}")
+
         if repairs:
-            notes.append("拓扑自补全：根据需求能力和质量属性补充 " + "、".join(dict.fromkeys(repairs)))
+            notes.append("拓扑质量属性补齐：根据 DeepSeek 质量属性补充 " + "、".join(dict.fromkeys(repairs)))
+
+    def _prune_irrelevant_topology(
+        self,
+        capabilities: list[str],
+        features: ExtractedFeatures,
+        graph_knowledge: dict,
+        nodes: dict[str, TopologyNode],
+        edges: list[TopologyEdge],
+        notes: list[str],
+    ) -> tuple[dict[str, TopologyNode], list[TopologyEdge]]:
+        expected_caps = self.extract_business_capabilities("", features, [])
+        expected_components = set(self._components_for_capabilities(expected_caps))
+        expected_components.update(str(item).strip() for item in (features.topology_expectations or {}).get("must_have_components", []) if str(item).strip())
+        expected_components.update(str(item).strip() for item in graph_knowledge.get("components", []) if str(item).strip())
+        expected_components.update(str(item).strip() for item in graph_knowledge.get("stores", []) if str(item).strip())
+
+        if not expected_components:
+            return nodes, edges
+
+        allowed_ids = {self._component_id(name) for name in expected_components}
+        always_keep = {"client", "gateway", "lb", "cdn"}
+        quality_keep = {self._component_id(name) for name in self._expected_quality_infrastructure(features)}
+        if "通知提醒" in expected_caps or "采购提醒" in expected_caps or "通知" in capabilities:
+            quality_keep.add("notify")
+        if features.data_flow == "event_stream" or any(item in expected_caps for item in ["库存一致性", "秒杀活动"]):
+            quality_keep.add("event_bus")
+
+        keep_ids = allowed_ids | always_keep | quality_keep
+        pruned_nodes = {node_id: node for node_id, node in nodes.items() if node_id in keep_ids}
+        pruned_edges = [
+            edge for edge in edges
+            if edge.source in pruned_nodes and edge.target in pruned_nodes
+        ]
+        removed = [node.name for node_id, node in nodes.items() if node_id not in pruned_nodes and node.layer in {"业务服务层", "数据层", "异步事件层", "治理层"}]
+        if removed:
+            notes.append("拓扑相关性裁剪：移除与当前业务能力无关的节点 " + "、".join(removed[:12]))
+        return pruned_nodes, pruned_edges
+
+    def _build_view_diagrams(self, nodes: list[TopologyNode], edges: list[TopologyEdge]) -> dict[str, str]:
+        node_map = {node.id: node for node in nodes}
+        overview_nodes, overview_edges = self._aggregate_dense_edges(nodes, edges)
+        return {
+            "总览图": self._render_mermaid(overview_nodes, overview_edges),
+            "完整图": self._render_mermaid(nodes, edges),
+            "业务链路图": self._render_mermaid(*self._project_view(nodes, edges, "business", node_map)),
+            "数据流图": self._render_mermaid(*self._project_view(nodes, edges, "data", node_map)),
+            "支撑设施图": self._render_mermaid(*self._project_view(nodes, edges, "support", node_map)),
+        }
+
+    def _build_structured_view_graphs(self, nodes: list[TopologyNode], edges: list[TopologyEdge]) -> dict[str, dict]:
+        node_map = {node.id: node for node in nodes}
+        overview_nodes, overview_edges = self._aggregate_dense_edges(nodes, edges)
+        business_nodes, business_edges = self._project_view(nodes, edges, "business", node_map)
+        data_nodes, data_edges = self._project_view(nodes, edges, "data", node_map)
+        support_nodes, support_edges = self._project_view(nodes, edges, "support", node_map)
+        return {
+            "总览图": self._serialize_graph(overview_nodes, overview_edges),
+            "完整图": self._serialize_graph(nodes, edges),
+            "业务链路图": self._serialize_graph(business_nodes, business_edges),
+            "数据流图": self._serialize_graph(data_nodes, data_edges),
+            "支撑设施图": self._serialize_graph(support_nodes, support_edges),
+        }
+
+    def _serialize_graph(self, nodes: list[TopologyNode], edges: list[TopologyEdge]) -> dict:
+        node_map = {node.id: node for node in nodes}
+        layer_order = [layer for layer in ["架构模式职责", "接入层", "业务服务层", "异步事件层", "治理层", "数据层"] if any(node.layer == layer for node in nodes)]
+        return {
+            "nodes": [
+                {"id": node.id, "label": node.name, "layer": node.layer}
+                for node in nodes
+            ],
+            "edges": [
+                {
+                    "source": edge.source,
+                    "target": edge.target,
+                    "label": edge.label,
+                    "kind": edge.kind,
+                    "category": self._edge_category(edge, node_map),
+                }
+                for edge in edges
+                if edge.source in node_map and edge.target in node_map
+            ],
+            "layers": layer_order,
+        }
+
+    def _project_view(
+        self,
+        nodes: list[TopologyNode],
+        edges: list[TopologyEdge],
+        view: str,
+        node_map: dict[str, TopologyNode],
+    ) -> tuple[list[TopologyNode], list[TopologyEdge]]:
+        selected_edges: list[TopologyEdge] = []
+        for edge in edges:
+            category = self._edge_category(edge, node_map)
+            if view == "business" and category in {"sync", "event", "responsibility"}:
+                if self._edge_touches_layer(edge, node_map, {"业务服务层", "接入层", "异步事件层", "架构模式职责"}):
+                    selected_edges.append(edge)
+            elif view == "data" and category == "data":
+                selected_edges.append(edge)
+            elif view == "support" and category in {"support", "responsibility"}:
+                selected_edges.append(edge)
+
+        selected_node_ids = {edge.source for edge in selected_edges} | {edge.target for edge in selected_edges}
+        if view == "business":
+            selected_node_ids.update(
+                node.id for node in nodes
+                if node.layer in {"接入层", "业务服务层", "异步事件层", "架构模式职责"}
+            )
+        elif view == "data":
+            selected_node_ids.update(node.id for node in nodes if node.layer == "数据层")
+        elif view == "support":
+            selected_node_ids.update(node.id for node in nodes if node.layer in {"治理层", "架构模式职责"})
+
+        selected_nodes = [node for node in nodes if node.id in selected_node_ids]
+        return selected_nodes or nodes, selected_edges or edges
+
+    def _aggregate_dense_edges(
+        self,
+        nodes: list[TopologyNode],
+        edges: list[TopologyEdge],
+    ) -> tuple[list[TopologyNode], list[TopologyEdge]]:
+        node_map = {node.id: node for node in nodes}
+        aggregate_nodes: dict[str, TopologyNode] = {node.id: node for node in nodes}
+        aggregate_edges: list[TopologyEdge] = []
+        consumed: set[int] = set()
+
+        for hub_id, hub in node_map.items():
+            grouped_in: dict[str, list[tuple[int, TopologyEdge]]] = {}
+            grouped_out: dict[str, list[tuple[int, TopologyEdge]]] = {}
+            for index, edge in enumerate(edges):
+                if self._edge_category(edge, node_map) == "responsibility":
+                    continue
+                if edge.target == hub_id and edge.source in node_map:
+                    grouped_in.setdefault(node_map[edge.source].layer, []).append((index, edge))
+                if edge.source == hub_id and edge.target in node_map:
+                    grouped_out.setdefault(node_map[edge.target].layer, []).append((index, edge))
+
+            for layer, group in grouped_in.items():
+                if len(group) < 3 or layer == "架构模式职责":
+                    continue
+                aggregate_id = self._aggregate_node_id(hub_id, layer, "in")
+                aggregate_nodes[aggregate_id] = TopologyNode(aggregate_id, self._aggregate_label(layer), layer)
+                aggregate_edges.append(TopologyEdge(aggregate_id, hub_id, self._aggregate_edge_label(group), group[0][1].kind))
+                consumed.update(index for index, _edge in group)
+
+            for layer, group in grouped_out.items():
+                if len(group) < 3 or layer == "架构模式职责":
+                    continue
+                aggregate_id = self._aggregate_node_id(hub_id, layer, "out")
+                aggregate_nodes[aggregate_id] = TopologyNode(aggregate_id, self._aggregate_label(layer), layer)
+                aggregate_edges.append(TopologyEdge(hub_id, aggregate_id, self._aggregate_edge_label(group), group[0][1].kind))
+                consumed.update(index for index, _edge in group)
+
+        for index, edge in enumerate(edges):
+            if index not in consumed:
+                aggregate_edges.append(edge)
+
+        reachable = {edge.source for edge in aggregate_edges} | {edge.target for edge in aggregate_edges}
+        overview_nodes = [node for node in aggregate_nodes.values() if node.id in reachable or node.id in {"client", "gateway"}]
+        return overview_nodes or nodes, aggregate_edges
 
     def _render_mermaid(self, nodes: list[TopologyNode], edges: list[TopologyEdge]) -> str:
         layer_names = ["架构模式职责", "接入层", "业务服务层", "异步事件层", "治理层", "数据层"]
@@ -849,12 +1240,56 @@ class TopologyGenerator:
                 continue
             seen_edges.add(key)
             arrow = "-.->" if edge.kind in {"event", "responsibility"} else "-->"
+            lines.append(f"  %% edge-category:{self._edge_category(edge, node_map)}")
             if edge.label:
                 lines.append(f"  {edge.source} {arrow}|{self._escape_label(edge.label)}| {edge.target}")
             else:
                 lines.append(f"  {edge.source} {arrow} {edge.target}")
 
         return "\n".join(lines)
+
+    @staticmethod
+    def _edge_touches_layer(edge: TopologyEdge, node_map: dict[str, TopologyNode], layers: set[str]) -> bool:
+        return node_map.get(edge.source, TopologyNode("", "", "")).layer in layers or node_map.get(edge.target, TopologyNode("", "", "")).layer in layers
+
+    @staticmethod
+    def _aggregate_node_id(hub_id: str, layer: str, direction: str) -> str:
+        digest = hashlib.sha1(f"{hub_id}:{layer}:{direction}".encode("utf-8")).hexdigest()[:8]
+        return f"agg_{digest}"
+
+    @staticmethod
+    def _aggregate_label(layer: str) -> str:
+        labels = {
+            "业务服务层": "业务服务组",
+            "接入层": "接入组件组",
+            "异步事件层": "异步组件组",
+            "治理层": "治理组件组",
+            "数据层": "数据存储组",
+        }
+        return labels.get(layer, f"{layer}组件组")
+
+    @staticmethod
+    def _aggregate_edge_label(group: list[tuple[int, TopologyEdge]]) -> str:
+        labels = [edge.label for _index, edge in group if edge.label]
+        if not labels:
+            return f"聚合 {len(group)} 条"
+        primary = list(dict.fromkeys(labels))[0]
+        return f"{primary} 等 {len(group)} 条"
+
+    def _edge_category(self, edge: TopologyEdge, node_map: dict[str, TopologyNode]) -> str:
+        if edge.kind == "responsibility":
+            return "responsibility"
+        if edge.kind == "event":
+            return "event"
+        source = node_map.get(edge.source)
+        target = node_map.get(edge.target)
+        if source and target and (source.layer == "数据层" or target.layer == "数据层"):
+            return "data"
+        if source and target and (source.layer == "治理层" or target.layer == "治理层"):
+            return "support"
+        if edge.source in {"monitoring", "audit", "service_registry", "config_center"} or edge.target in {"monitoring", "audit", "service_registry", "config_center"}:
+            return "support"
+        return "sync"
 
     def _dedupe_graph(
         self,

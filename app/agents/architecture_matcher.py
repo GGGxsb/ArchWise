@@ -153,6 +153,19 @@ class ArchitectureMatcherAgent:
         if qualities.get("concurrency", 0) >= 0.8 and qualities.get("scalability", 0) >= 0.7 and style.id == "microservices":
             adjustment += 0.06
 
+        capability_scope = len([item for item in features.business_capabilities if str(item).strip()])
+        low_pressure_scope = (
+            capability_scope
+            and capability_scope <= 7
+            and qualities.get("concurrency", 0) < 0.6
+            and qualities.get("realtime", 0) < 0.6
+            and qualities.get("scalability", 0) < 0.65
+        )
+        if low_pressure_scope and style.id == "microservices":
+            adjustment -= 0.1
+            deductions.append("业务能力范围较小，微服务拆分收益不足")
+            risks.append("当前需求规模偏小，微服务会放大部署和治理成本")
+
         if features.data_flow == "event_stream" and style.id not in {"event_driven", "microservices", "cqrs", "serverless"}:
             adjustment -= 0.1
             deductions.append("事件流场景适配度不足")

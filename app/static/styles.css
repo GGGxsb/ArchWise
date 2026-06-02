@@ -582,14 +582,129 @@ th {
 }
 
 .topology {
-  min-height: 300px;
-  display: grid;
-  place-items: center;
-  overflow-x: auto;
+  height: min(64vh, 720px);
+  min-height: 360px;
+  display: block;
+  overflow: auto;
   border: 1px dashed var(--line);
   border-radius: 8px;
   padding: 16px;
   background: #fbfcfe;
+}
+
+.topology-canvas {
+  width: max-content;
+  height: max-content;
+  min-width: 100%;
+  min-height: 100%;
+  padding: 16px;
+  position: relative;
+}
+
+.topology-canvas.svg-mode,
+.topology-canvas.mermaid-mode {
+  display: grid;
+  place-items: start center;
+  background-image:
+    linear-gradient(rgba(148, 163, 184, 0.12) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148, 163, 184, 0.12) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+
+.diagram-error {
+  margin: 0;
+  overflow: auto;
+  border: 1px solid #f2d3b8;
+  border-radius: 8px;
+  background: #fff8f1;
+  color: #7a3213;
+  padding: 14px;
+  white-space: pre-wrap;
+  line-height: 1.6;
+}
+
+.topology-canvas svg {
+  display: block;
+  max-width: none;
+  transform-origin: 0 0;
+}
+
+.topology-board {
+  position: relative;
+  transform-origin: 0 0;
+  background-image:
+    linear-gradient(rgba(148, 163, 184, 0.12) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148, 163, 184, 0.12) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+
+.topology-links {
+  position: absolute;
+  inset: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.topology-link {
+  fill: none;
+  stroke: #7a869a;
+  stroke-width: 1.5;
+}
+
+.topology-link.event {
+  stroke-dasharray: 5 4;
+}
+
+.topology-link-label {
+  fill: #52606d;
+  paint-order: stroke;
+  stroke: #fbfcfe;
+  stroke-width: 4px;
+  stroke-linejoin: round;
+  text-anchor: middle;
+  font-size: 11px;
+}
+
+.topology-node {
+  position: absolute;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  width: 140px;
+  min-height: 58px;
+  border: 1px solid #cfd8e3;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 8px 22px rgba(15, 23, 42, 0.08);
+  color: #243447;
+  cursor: grab;
+  padding: 8px 10px;
+  text-align: center;
+  touch-action: none;
+  user-select: none;
+}
+
+.topology-node strong {
+  display: block;
+  max-width: 118px;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.topology-node span {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.2;
+}
+
+.topology-node.dragging {
+  z-index: 4;
+  border-color: var(--accent);
+  box-shadow: 0 14px 34px rgba(24, 118, 105, 0.18);
+  cursor: grabbing;
 }
 
 .topology-loading {
@@ -609,6 +724,105 @@ th {
 .topology-loading span {
   max-width: 360px;
   line-height: 1.6;
+}
+
+.topology-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: none;
+  grid-template-rows: auto 1fr;
+  background: rgba(15, 23, 42, 0.74);
+  padding: 18px;
+}
+
+.toast-root {
+  position: fixed;
+  top: 18px;
+  right: 18px;
+  z-index: 90;
+  display: grid;
+  gap: 10px;
+  width: min(360px, calc(100vw - 32px));
+  pointer-events: none;
+}
+
+.toast {
+  display: grid;
+  gap: 4px;
+  border: 1px solid #f1c7b4;
+  border-left: 4px solid #d96f3a;
+  border-radius: 8px;
+  background: #fffaf7;
+  box-shadow: 0 14px 38px rgba(15, 23, 42, 0.14);
+  color: #633018;
+  padding: 12px 14px;
+  line-height: 1.5;
+  animation: toast-in 160ms ease-out;
+}
+
+.toast strong {
+  color: #7a3213;
+  font-size: 14px;
+}
+
+.toast span {
+  color: #70452f;
+  font-size: 13px;
+}
+
+.toast.info {
+  border-color: #b8d7ef;
+  border-left-color: #3d8fd1;
+  background: #f6fbff;
+  color: #224c70;
+}
+
+.toast.info strong {
+  color: #1f5b89;
+}
+
+.toast.info span {
+  color: #315d7c;
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.topology-modal.open {
+  display: grid;
+}
+
+.topology-modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 8px 8px 0 0;
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-bottom: 0;
+}
+
+.topology-modal-canvas {
+  overflow: auto;
+  background: #fbfcfe;
+  border: 1px solid var(--line);
+  border-radius: 0 0 8px 8px;
+  padding: 20px;
+}
+
+.topology-canvas.modal {
+  min-width: max-content;
 }
 
 .spinner {

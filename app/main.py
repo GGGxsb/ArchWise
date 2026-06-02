@@ -3,13 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from app.knowledge.repository import KnowledgeRepository
-from app.models.schemas import CaseRequest, KnowledgeStyleRequest, RequirementRequest
+from app.models.schemas import CaseRequest, KnowledgeStyleRequest, RequirementRequest, TopologyRequest
+from app.services.exceptions import DeepSeekServiceError, RequirementParsingError
 from app.services.knowledge_graph import KnowledgeGraphService
 from app.services.recommendation_service import RecommendationService
 
@@ -46,13 +47,52 @@ async def llm_status():
 
 @app.post("/api/recommend")
 async def recommend(payload: RequirementRequest):
-    return await service.recommend(payload.requirement, payload.top_k)
+    try:
+        return await service.recommend(
+            payload.requirement,
+            payload.top_k,
+            topology_options={
+                "fast_mode": payload.topology_fast_mode,
+                "llm_timeout_seconds": payload.topology_llm_timeout_seconds,
+                "repair_max_rounds": payload.topology_repair_max_rounds,
+            },
+        )
+    except (RequirementParsingError, DeepSeekServiceError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @app.post("/api/recommend/stream")
 async def recommend_stream(payload: RequirementRequest):
     return StreamingResponse(
-        service.recommend_stream(payload.requirement, payload.top_k),
+        service.recommend_stream(
+            payload.requirement,
+            payload.top_k,
+            topology_options={
+                "fast_mode": payload.topology_fast_mode,
+                "llm_timeout_seconds": payload.topology_llm_timeout_seconds,
+                "repair_max_rounds": payload.topology_repair_max_rounds,
+            },
+        ),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/api/topology/stream")
+async def topology_stream(payload: TopologyRequest):
+    return StreamingResponse(
+        service.topology_stream(
+            requirement=payload.requirement,
+            features=payload.features,
+            final_recommendation=payload.final_recommendation,
+            composition_recommendation=payload.composition_recommendation,
+            decision_trace=payload.decision_trace,
+            topology_options={
+                "fast_mode": payload.topology_fast_mode,
+                "llm_timeout_seconds": payload.topology_llm_timeout_seconds,
+                "repair_max_rounds": payload.topology_repair_max_rounds,
+            },
+        ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -76,6 +116,16 @@ async def neo4j_status():
 @app.post("/api/knowledge/neo4j/sync")
 async def sync_neo4j():
     return graph_service.sync_to_neo4j(repository.list_styles())
+
+
+@app.post("/api/knowledge/neo4j/rebuild-topology")
+async def rebuild_neo4j_topology():
+    return graph_service.rebuild_domain_topology()
+
+
+@app.get("/api/knowledge/neo4j/duplicates")
+async def neo4j_duplicate_like_nodes():
+    return await graph_service.detect_duplicate_like_nodes()
 
 
 @app.post("/api/knowledge/styles")

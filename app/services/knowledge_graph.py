@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import os
-
 from app.models.schemas import ArchitectureStyle, ExtractedFeatures
+from app.services.knowledge_normalizer import KnowledgeNormalizer
 from app.services.neo4j_aura import Neo4jAuraService
 
 
@@ -19,6 +18,7 @@ QUALITY_TO_SCENARIO = {
 class KnowledgeGraphService:
     def __init__(self) -> None:
         self.neo4j = Neo4jAuraService()
+        self.normalizer = KnowledgeNormalizer()
 
     def build_graph(self, styles: list[ArchitectureStyle]) -> dict[str, list[dict[str, str]]]:
         if self.neo4j.configured:
@@ -106,8 +106,53 @@ class KnowledgeGraphService:
             "singletons": singleton_result,
         }
 
+    def rebuild_domain_topology(self) -> dict[str, object]:
+        topology_result = self.neo4j.rebuild_domain_topology()
+        singleton_result = self.neo4j.sync_singleton_components()
+        return {
+            "ok": bool(topology_result.get("ok") and singleton_result.get("ok")),
+            "domain_topology": topology_result,
+            "singletons": singleton_result,
+        }
+
     def merge_topology_patch(self, requirement: str, features: ExtractedFeatures, patch: dict[str, object]) -> dict[str, object]:
-        return self.neo4j.merge_topology_patch(requirement, features.keywords, patch)
+        return self.neo4j.merge_topology_patch(
+            requirement,
+            features.keywords,
+            patch,
+            business_capabilities=features.business_capabilities,
+            domain=features.domain,
+        )
+
+    async def normalize_topology_patch(
+        self,
+        patch: dict[str, object],
+        requirement: str,
+        features: ExtractedFeatures,
+        graph_knowledge: dict[str, object] | None = None,
+        coverage: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        existing_records = self._topology_records_for_normalization(graph_knowledge or {}, coverage or {})
+        return await self.normalizer.normalize_patch(
+            patch,
+            existing_records,
+            requirement=requirement,
+            features=features,
+        )
+
+    async def detect_duplicate_like_nodes(self) -> dict[str, object]:
+        records = self.neo4j.fetch_topology_node_records() if self.neo4j.configured else {
+            "BusinessCapability": [],
+            "ArchitectureComponent": [],
+            "DataStore": [],
+        }
+        findings = await self.normalizer.detect_duplicates(records)
+        return {
+            "ok": True,
+            "configured": self.neo4j.configured,
+            "findings": findings,
+            "count": len(findings),
+        }
 
     def retrieve_topology_knowledge(self, requirement: str, features: ExtractedFeatures) -> dict[str, object]:
         if self.neo4j.configured:
@@ -115,10 +160,67 @@ class KnowledgeGraphService:
                 requirement,
                 features.keywords,
                 features.quality_attributes,
+                features.business_capabilities,
+                features.domain,
             )
             if result.get("components") or result.get("stores"):
                 return result
         return {"components": [], "stores": [], "edges": [], "scenarios": [], "capabilities": []}
+
+    def _topology_records_for_normalization(
+        self,
+        graph_knowledge: dict[str, object],
+        coverage: dict[str, object],
+    ) -> dict[str, list[dict[str, object]]]:
+        records = self.neo4j.fetch_topology_node_records() if self.neo4j.configured else {
+            "BusinessCapability": [],
+            "ArchitectureComponent": [],
+            "DataStore": [],
+        }
+
+        def append(label: str, name: object, context: dict[str, object]) -> None:
+            clean_name = str(name).strip()
+            if not clean_name:
+                return
+            if any(item.get("name") == clean_name for item in records[label]):
+                return
+            records[label].append({"label": label, "name": clean_name, "context": context})
+
+        for capability in list(graph_knowledge.get("capabilities", []) or []):
+            append(
+                "BusinessCapability",
+                capability,
+                {
+                    "scenarios": list(graph_knowledge.get("scenarios", []) or []),
+                    "capabilities": [capability],
+                    "components": list(graph_knowledge.get("components", []) or []),
+                    "stores": list(graph_knowledge.get("stores", []) or []),
+                },
+            )
+
+        component_names = list(graph_knowledge.get("components", []) or [])
+        for component in component_names:
+            append(
+                "ArchitectureComponent",
+                component,
+                {
+                    "scenarios": list(graph_knowledge.get("scenarios", []) or []),
+                    "capabilities": list(graph_knowledge.get("capabilities", []) or []),
+                    "neighbors": component_names,
+                },
+            )
+
+        for store in list(graph_knowledge.get("stores", []) or []):
+            append(
+                "DataStore",
+                store,
+                {
+                    "scenarios": list(graph_knowledge.get("scenarios", []) or []),
+                    "capabilities": list(graph_knowledge.get("capabilities", []) or []),
+                    "components": list(graph_knowledge.get("components", []) or []),
+                },
+            )
+        return records
 
     @staticmethod
     def _quality_name(feature_name: str) -> str:

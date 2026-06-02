@@ -27,7 +27,7 @@
     "id": "R004",
     "description": "事务和审计场景优先 CQRS、分层与微服务",
     "data_flow": "transactional",
-    "prefer": ["cqrs", "layered", "microservices", "hexagonal"],
+    "prefer": ["cqrs", "layered", "hexagonal"],
     "reject": [],
     "reason": "事务和审计需求需要清晰命令查询边界、可靠存储和业务规则隔离。"
   },

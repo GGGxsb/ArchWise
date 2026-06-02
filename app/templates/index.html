@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ArchWise 架构风格智能助手</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20260527-4">
+  <link rel="stylesheet" href="/static/styles.css?v=20260602-17">
   <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
 </head>
 <body>
@@ -29,6 +29,31 @@
               <option value="12" selected>完整 12 种</option>
               <option value="6">精简 6 种</option>
               <option value="3">重点 3 种</option>
+            </select>
+          </label>
+          <label class="inline-field" for="topologyMode">
+            <span>拓扑模式</span>
+            <select id="topologyMode">
+              <option value="fast" selected>快速</option>
+              <option value="precise">精细</option>
+            </select>
+          </label>
+          <label class="inline-field" for="topologyTimeout">
+            <span>拓扑等待</span>
+            <select id="topologyTimeout">
+              <option value="8">8 秒</option>
+              <option value="12" selected>12 秒</option>
+              <option value="20">20 秒</option>
+              <option value="30">30 秒</option>
+            </select>
+          </label>
+          <label class="inline-field" for="topologyRounds">
+            <span>补全轮数</span>
+            <select id="topologyRounds">
+              <option value="0">0 轮</option>
+              <option value="1" selected>1 轮</option>
+              <option value="2">2 轮</option>
+              <option value="3">3 轮</option>
             </select>
           </label>
           <span id="status">等待输入</span>
@@ -94,7 +119,11 @@
         <div class="panel-title-row">
           <h2>架构拓扑图</h2>
           <div class="copy-actions">
-            <button id="copyMermaidBtn" type="button" class="ghost-button">复制 Mermaid</button>
+            <button id="zoomOutBtn" type="button" class="ghost-button">缩小</button>
+            <button id="zoomResetBtn" type="button" class="ghost-button">适配</button>
+            <button id="zoomInBtn" type="button" class="ghost-button">放大</button>
+            <button id="fullscreenTopologyBtn" type="button" class="ghost-button">大图查看</button>
+            <button id="copyTopologyJsonBtn" type="button" class="ghost-button">复制拓扑 JSON</button>
             <button id="copySvgBtn" type="button" class="ghost-button">复制 SVG</button>
           </div>
         </div>
@@ -103,6 +132,19 @@
       </section>
     </section>
   </main>
-  <script src="/static/app.js?v=20260601-1"></script>
+  <div id="toastRoot" class="toast-root" aria-live="polite" aria-atomic="true"></div>
+  <div id="topologyModal" class="topology-modal" aria-hidden="true">
+    <div class="topology-modal-header">
+      <strong>架构拓扑大图</strong>
+      <div class="copy-actions">
+        <button id="modalZoomOutBtn" type="button" class="ghost-button">缩小</button>
+        <button id="modalZoomResetBtn" type="button" class="ghost-button">适配</button>
+        <button id="modalZoomInBtn" type="button" class="ghost-button">放大</button>
+        <button id="closeTopologyModalBtn" type="button" class="ghost-button">关闭</button>
+      </div>
+    </div>
+    <div id="topologyModalCanvas" class="topology-modal-canvas"></div>
+  </div>
+  <script src="/static/app.js?v=20260602-17"></script>
 </body>
 </html>

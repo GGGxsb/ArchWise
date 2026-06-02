@@ -57,6 +57,9 @@ class Neo4jAuraService:
         return {"ok": True, "styles_synced": len(styles)}
 
     def sync_domain_topology(self, knowledge_file: Path | None = None) -> dict[str, Any]:
+        return self.rebuild_domain_topology(knowledge_file)
+
+    def rebuild_domain_topology(self, knowledge_file: Path | None = None) -> dict[str, Any]:
         if not self.configured:
             return {"ok": False, "error": "Neo4j AuraDB is not configured."}
 
@@ -65,9 +68,11 @@ class Neo4jAuraService:
         with self._driver() as driver:
             with driver.session(database=self.database) as session:
                 self._create_constraints(session)
+                session.execute_write(self._reset_domain_topology)
                 session.execute_write(self._merge_domain_topology, data)
         return {
             "ok": True,
+            "mode": "rebuilt",
             "scenarios_synced": len(data.get("scenarios", [])),
             "capabilities_synced": len(data.get("capabilities", {})),
         }
@@ -100,14 +105,23 @@ class Neo4jAuraService:
 
         return {"ok": True, "singletons_synced": len(singletons)}
 
-    def merge_topology_patch(self, requirement: str, keywords: list[str], patch: dict[str, Any]) -> dict[str, Any]:
+    def merge_topology_patch(
+        self,
+        requirement: str,
+        keywords: list[str],
+        patch: dict[str, Any],
+        business_capabilities: list[str] | None = None,
+        domain: str = "",
+    ) -> dict[str, Any]:
         if not self.configured:
             return {"ok": False, "error": "Neo4j AuraDB is not configured."}
 
-        scenario_ids = self._match_domain_scenarios(requirement, keywords)
+        scenario_ids = [str(patch.get("scenario_id", "")).strip()] if str(patch.get("scenario_id", "")).strip() else []
+        if not scenario_ids:
+            scenario_ids = self._match_domain_scenarios(requirement, keywords, business_capabilities or [], domain)
         if not scenario_ids:
             scenario_ids = ["llm_learned"]
-        scenario_name = patch.get("scenario_name") or "LLM 补全场景"
+        scenario_name = patch.get("scenario_name") or domain or "LLM 补全场景"
         try:
             with self._driver() as driver:
                 with driver.session(database=self.database) as session:
@@ -124,20 +138,144 @@ class Neo4jAuraService:
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
-    def retrieve_topology_knowledge(self, requirement: str, keywords: list[str], qualities: dict[str, float]) -> dict[str, Any]:
+    def fetch_topology_node_names(self) -> dict[str, list[str]]:
+        if not self.configured:
+            return {"BusinessCapability": [], "ArchitectureComponent": [], "DataStore": []}
+
+        query = """
+        MATCH (n)
+        WHERE n:BusinessCapability OR n:ArchitectureComponent OR n:DataStore
+        RETURN labels(n) AS labels, n.name AS name
+        """
+        names = {"BusinessCapability": [], "ArchitectureComponent": [], "DataStore": []}
+        try:
+            with self._driver() as driver:
+                with driver.session(database=self.database) as session:
+                    for record in session.run(query):
+                        name = record.get("name")
+                        labels = record.get("labels") or []
+                        if not name:
+                            continue
+                        for label in names:
+                            if label in labels:
+                                names[label].append(name)
+            return {label: self._dedupe(items) for label, items in names.items()}
+        except Exception:
+            return {"BusinessCapability": [], "ArchitectureComponent": [], "DataStore": []}
+
+    def fetch_topology_node_records(self) -> dict[str, list[dict[str, Any]]]:
+        if not self.configured:
+            return {"BusinessCapability": [], "ArchitectureComponent": [], "DataStore": []}
+
+        queries = {
+            "BusinessCapability": """
+            MATCH (n:BusinessCapability)
+            OPTIONAL MATCH (scenario:DomainScenario)-[:REQUIRES]->(n)
+            OPTIONAL MATCH (n)-[:IMPLEMENTED_BY]->(component:ArchitectureComponent)
+            OPTIONAL MATCH (n)-[:USES_STORE]->(store:DataStore)
+            RETURN n.name AS name,
+                   collect(DISTINCT scenario.name) AS scenarios,
+                   collect(DISTINCT component.name) AS components,
+                   collect(DISTINCT store.name) AS stores,
+                   [] AS capabilities,
+                   [] AS neighbors
+            """,
+            "ArchitectureComponent": """
+            MATCH (n:ArchitectureComponent)
+            OPTIONAL MATCH (capability:BusinessCapability)-[:IMPLEMENTED_BY]->(n)
+            OPTIONAL MATCH (scenario:DomainScenario)-[:REQUIRES]->(capability)
+            OPTIONAL MATCH (n)-[:STORES_IN]->(store:DataStore)
+            OPTIONAL MATCH (n)-[:DEPENDS_ON]-(neighbor:ArchitectureComponent)
+            RETURN n.name AS name,
+                   collect(DISTINCT scenario.name) AS scenarios,
+                   collect(DISTINCT capability.name) AS capabilities,
+                   [] AS components,
+                   collect(DISTINCT store.name) AS stores,
+                   collect(DISTINCT neighbor.name) AS neighbors
+            """,
+            "DataStore": """
+            MATCH (n:DataStore)
+            OPTIONAL MATCH (capability:BusinessCapability)-[:USES_STORE]->(n)
+            OPTIONAL MATCH (component:ArchitectureComponent)-[:STORES_IN]->(n)
+            OPTIONAL MATCH (scenario:DomainScenario)-[:REQUIRES]->(capability)
+            RETURN n.name AS name,
+                   collect(DISTINCT scenario.name) AS scenarios,
+                   collect(DISTINCT capability.name) AS capabilities,
+                   collect(DISTINCT component.name) AS components,
+                   [] AS stores,
+                   [] AS neighbors
+            """,
+        }
+        records = {"BusinessCapability": [], "ArchitectureComponent": [], "DataStore": []}
+        try:
+            with self._driver() as driver:
+                with driver.session(database=self.database) as session:
+                    for label, query in queries.items():
+                        for record in session.run(query):
+                            name = record.get("name")
+                            if not name:
+                                continue
+                            records[label].append(
+                                {
+                                    "label": label,
+                                    "name": name,
+                                    "context": {
+                                        "scenarios": self._dedupe(list(record.get("scenarios", []) or [])),
+                                        "capabilities": self._dedupe(list(record.get("capabilities", []) or [])),
+                                        "components": self._dedupe(list(record.get("components", []) or [])),
+                                        "stores": self._dedupe(list(record.get("stores", []) or [])),
+                                        "neighbors": self._dedupe(list(record.get("neighbors", []) or [])),
+                                    },
+                                }
+                            )
+            return records
+        except Exception:
+            return {"BusinessCapability": [], "ArchitectureComponent": [], "DataStore": []}
+
+    def retrieve_topology_knowledge(
+        self,
+        requirement: str,
+        keywords: list[str],
+        qualities: dict[str, float],
+        business_capabilities: list[str] | None = None,
+        domain: str = "",
+    ) -> dict[str, Any]:
         if not self.configured:
             return {"components": [], "stores": [], "edges": [], "scenarios": [], "capabilities": []}
 
-        scenario_ids = self._match_domain_scenarios(requirement, keywords)
         active_qualities = [name for name, value in qualities.items() if value >= 0.6]
+        business_capabilities = [item for item in (business_capabilities or []) if item]
+        scenario_ids = [] if business_capabilities else self._match_domain_scenarios("", keywords, [], domain)
         scenario_query = """
         MATCH (scenario:DomainScenario)
         WHERE scenario.id IN $scenario_ids
-        OPTIONAL MATCH (scenario)-[:REQUIRES]->(cap:BusinessCapability)
-        OPTIONAL MATCH (cap)-[:IMPLEMENTED_BY]->(component:ArchitectureComponent)
-        OPTIONAL MATCH (component)-[:STORES_IN]->(store:DataStore)
-        RETURN collect(DISTINCT scenario.name) AS scenarios,
-               collect(DISTINCT cap.name) AS capabilities,
+        OPTIONAL MATCH (scenario)-[requires:REQUIRES]->(cap:BusinessCapability)
+        WITH collect(DISTINCT scenario.name) AS scenarios,
+             collect(DISTINCT cap.name) AS scenario_capabilities
+        WITH scenarios, scenario_capabilities,
+             CASE
+               WHEN size($business_capabilities) = 0 THEN scenario_capabilities
+               ELSE [cap IN scenario_capabilities WHERE cap IN $business_capabilities]
+             END AS selected_capabilities
+        OPTIONAL MATCH (cap:BusinessCapability)
+        WHERE cap.name IN selected_capabilities
+        OPTIONAL MATCH (cap)-[impl:IMPLEMENTED_BY]->(component:ArchitectureComponent)
+        WHERE impl.scenario_id IN $scenario_ids OR impl.scenario_id IS NULL
+        OPTIONAL MATCH (cap)-[uses:USES_STORE]->(store:DataStore)
+        WHERE uses.scenario_id IN $scenario_ids OR uses.scenario_id IS NULL
+        RETURN scenarios,
+               selected_capabilities AS capabilities,
+               collect(DISTINCT component.name) AS components,
+               collect(DISTINCT store.name) AS stores
+        """
+        capability_query = """
+        MATCH (cap:BusinessCapability)
+        WHERE cap.name IN $business_capabilities
+        OPTIONAL MATCH (cap)-[impl:IMPLEMENTED_BY]->(component:ArchitectureComponent)
+        WHERE size($scenario_ids) = 0 OR impl.scenario_id IN $scenario_ids OR impl.scenario_id IS NULL
+        OPTIONAL MATCH (cap)-[uses:USES_STORE]->(store:DataStore)
+        WHERE size($scenario_ids) = 0 OR uses.scenario_id IN $scenario_ids OR uses.scenario_id IS NULL
+        RETURN collect(DISTINCT cap.name) AS capabilities,
                collect(DISTINCT component.name) AS components,
                collect(DISTINCT store.name) AS stores
         """
@@ -147,40 +285,73 @@ class Neo4jAuraService:
         RETURN collect(DISTINCT component.name) AS components
         """
         edge_query = """
-        MATCH (a:ArchitectureComponent)-[r:DEPENDS_ON]->(b:ArchitectureComponent)
-        WHERE a.name IN $components AND b.name IN $targets
+        MATCH (a)-[r:DEPENDS_ON|STORES_IN]->(b)
+        WHERE a.name IN $components
+          AND b.name IN $targets
+          AND (size($scenario_ids) = 0 OR r.scenario_id IN $scenario_ids OR r.capability IN $capabilities)
         RETURN collect(DISTINCT {source: a.name, target: b.name, label: coalesce(r.label, "依赖"), kind: coalesce(r.kind, "sync")}) AS edges
         """
         try:
             with self._driver() as driver:
                 with driver.session(database=self.database) as session:
-                    scenario_record = session.run(scenario_query, scenario_ids=scenario_ids).single()
-                    if not scenario_record:
-                        return {"components": [], "stores": [], "edges": [], "scenarios": [], "capabilities": []}
+                    scenario_record = session.run(
+                        scenario_query,
+                        scenario_ids=scenario_ids,
+                        business_capabilities=business_capabilities,
+                    ).single()
+                    capability_record = session.run(
+                        capability_query,
+                        scenario_ids=scenario_ids,
+                        business_capabilities=business_capabilities,
+                    ).single()
                     quality_record = session.run(quality_query, active_qualities=active_qualities).single()
+                    scenario_record = scenario_record or {}
+                    capability_record = capability_record or {}
+                    quality_record = quality_record or {}
                     components = self._dedupe(
-                        list(scenario_record["components"] or []) + list((quality_record or {}).get("components", []) or [])
+                        list(scenario_record.get("components", []) or [])
+                        + list(capability_record.get("components", []) or [])
+                        + list(quality_record.get("components", []) or [])
                     )
-                    stores = self._dedupe(list(scenario_record["stores"] or []))
-                    edge_record = session.run(edge_query, components=components, targets=components + stores).single()
+                    stores = self._dedupe(
+                        list(scenario_record.get("stores", []) or [])
+                        + list(capability_record.get("stores", []) or [])
+                    )
+                    selected_capabilities = self._dedupe(
+                        list(scenario_record.get("capabilities", []) or [])
+                        + list(capability_record.get("capabilities", []) or [])
+                    )
+                    edge_record = session.run(
+                        edge_query,
+                        components=components,
+                        targets=components + stores,
+                        scenario_ids=scenario_ids,
+                        capabilities=selected_capabilities,
+                    ).single()
                     return {
                         "components": [item for item in components if item],
                         "stores": [item for item in stores if item],
                         "edges": [item for item in (edge_record["edges"] if edge_record else []) if item["source"] and item["target"]],
-                        "scenarios": [item for item in scenario_record["scenarios"] if item],
-                        "capabilities": [item for item in scenario_record["capabilities"] if item],
+                        "scenarios": [item for item in scenario_record.get("scenarios", []) if item],
+                        "capabilities": selected_capabilities,
+                        "scenario_ids": scenario_ids,
                     }
         except Exception:
             return {"components": [], "stores": [], "edges": [], "scenarios": [], "capabilities": []}
 
     @staticmethod
-    def _match_domain_scenarios(requirement: str, keywords: list[str]) -> list[str]:
-        text = requirement + " " + " ".join(keywords)
+    def _match_domain_scenarios(
+        requirement: str,
+        keywords: list[str],
+        business_capabilities: list[str] | None = None,
+        domain: str = "",
+    ) -> list[str]:
+        text = requirement + " " + " ".join(keywords) + " " + " ".join(business_capabilities or []) + " " + domain
         rules = {
             "instant_messaging": ["即时通讯", "即时通信", "聊天", "消息", "万人在线", "同时在线", "视频通话", "长连接"],
             "social_media": ["社交", "发帖", "点赞", "评论", "私信", "内容推荐"],
             "online_education": ["在线教育", "上课", "课程", "直播", "录播", "回放", "课后互动"],
-            "ecommerce": ["电商", "下单", "支付", "促销", "订单", "退款", "库存"],
+            "ecommerce": ["电商", "商品", "购物车", "下单", "支付", "促销", "订单", "退款", "秒杀", "物流"],
             "iot": ["物联网", "设备", "传感器", "采集", "远程控制", "告警"],
             "big_data": ["大数据", "TB", "实时计算", "离线分析", "数据可视化", "批量处理", "ETL"],
             "finance_payment": ["金融", "支付", "交易", "对账", "清算", "安全"],
@@ -196,11 +367,18 @@ class Neo4jAuraService:
             "library": ["图书", "借阅", "归还"],
             "travel_booking": ["旅游", "酒店", "机票", "门票", "预订"],
             "ai_image": ["AI 绘画", "提示词", "生成图片", "图片存储"],
+            "lab_reagent": ["实验室", "试剂", "申领", "领用", "出库", "库存余量", "低值试剂", "采购提醒"],
         }
-        return [
-            scenario_id for scenario_id, scenario_keywords in rules.items()
-            if any(keyword in text for keyword in scenario_keywords)
-        ]
+        scored = []
+        for scenario_id, scenario_keywords in rules.items():
+            hits = [keyword for keyword in scenario_keywords if keyword in text]
+            if hits:
+                scored.append((scenario_id, len(hits)))
+        if not scored:
+            return []
+        scored.sort(key=lambda item: item[1], reverse=True)
+        best_score = scored[0][1]
+        return [scenario_id for scenario_id, score in scored if score == best_score or score >= 2][:3]
 
     @staticmethod
     def _dedupe(items: list[Any]) -> list[Any]:
@@ -306,10 +484,29 @@ class Neo4jAuraService:
             )
 
     @staticmethod
+    def _reset_domain_topology(tx) -> None:
+        tx.run(
+            """
+            MATCH (n)
+            WHERE n:DomainScenario
+               OR n:BusinessCapability
+               OR n:ArchitectureComponent
+               OR n:DataStore
+            DETACH DELETE n
+            """
+        )
+
+    @staticmethod
     def _merge_domain_topology(tx, data: dict[str, Any]) -> None:
         capabilities = data.get("capabilities", {})
         component_layers = data.get("component_layers", {})
         singleton_components = set(data.get("singleton_components", []))
+        capability_scenarios: dict[str, list[dict[str, str]]] = {}
+        store_names = {
+            store
+            for spec in capabilities.values()
+            for store in spec.get("stores", [])
+        }
 
         for scenario in data.get("scenarios", []):
             tx.run(
@@ -322,47 +519,72 @@ class Neo4jAuraService:
                 keywords=scenario.get("keywords", []),
             )
             for capability_name in scenario.get("capabilities", []):
+                capability_scenarios.setdefault(capability_name, []).append(
+                    {"id": scenario["id"], "name": scenario["name"]}
+                )
                 tx.run(
                     """
                     MATCH (s:DomainScenario {id: $scenario_id})
                     MERGE (c:BusinessCapability {name: $capability})
-                    MERGE (s)-[:REQUIRES]->(c)
+                    MERGE (s)-[r:REQUIRES]->(c)
+                    SET r.scenario_id = $scenario_id,
+                        r.scenario_name = $scenario_name
                     """,
                     scenario_id=scenario["id"],
+                    scenario_name=scenario["name"],
                     capability=capability_name,
                 )
 
         for capability_name, spec in capabilities.items():
             tx.run("MERGE (:BusinessCapability {name: $name})", name=capability_name)
+            scoped_scenarios = capability_scenarios.get(capability_name) or [{"id": "", "name": ""}]
             for component_name in spec.get("components", []):
-                tx.run(
-                    """
-                    MATCH (c:BusinessCapability {name: $capability})
-                    MERGE (component:ArchitectureComponent {name: $component})
-                    SET component.layer = $layer,
-                        component.singleton = $singleton
-                    MERGE (c)-[:IMPLEMENTED_BY]->(component)
-                    """,
-                    capability=capability_name,
-                    component=component_name,
-                    layer=component_layers.get(component_name, "业务服务层"),
-                    singleton=component_name in singleton_components,
-                )
+                for scoped in scoped_scenarios:
+                    tx.run(
+                        """
+                        MATCH (c:BusinessCapability {name: $capability})
+                        MERGE (component:ArchitectureComponent {name: $component})
+                        SET component.layer = $layer,
+                            component.singleton = $singleton
+                        MERGE (c)-[r:IMPLEMENTED_BY]->(component)
+                        SET r.scenario_id = $scenario_id,
+                            r.scenario_name = $scenario_name,
+                            r.capability = $capability
+                        """,
+                        capability=capability_name,
+                        component=component_name,
+                        layer=component_layers.get(component_name, "业务服务层"),
+                        singleton=component_name in singleton_components,
+                        scenario_id=scoped["id"],
+                        scenario_name=scoped["name"],
+                    )
             for store_name in spec.get("stores", []):
-                tx.run(
-                    """
-                    MATCH (c:BusinessCapability {name: $capability})
-                    MERGE (store:DataStore {name: $store})
-                    SET store.singleton = $singleton
-                    MERGE (c)-[:USES_STORE]->(store)
-                    WITH c, store
-                    MATCH (component:ArchitectureComponent)<-[:IMPLEMENTED_BY]-(c)
-                    MERGE (component)-[:STORES_IN]->(store)
-                    """,
-                    capability=capability_name,
-                    store=store_name,
-                    singleton=store_name in singleton_components,
-                )
+                for scoped in scoped_scenarios:
+                    tx.run(
+                        """
+                        MATCH (c:BusinessCapability {name: $capability})
+                        MERGE (store:DataStore {name: $store})
+                        SET store.singleton = $singleton
+                        MERGE (c)-[uses:USES_STORE]->(store)
+                        SET uses.scenario_id = $scenario_id,
+                            uses.scenario_name = $scenario_name,
+                            uses.capability = $capability
+                        WITH c, store
+                        MATCH (component:ArchitectureComponent)<-[impl:IMPLEMENTED_BY]-(c)
+                        WHERE impl.scenario_id = $scenario_id OR impl.scenario_id = ""
+                        MERGE (component)-[stores:STORES_IN]->(store)
+                        SET stores.scenario_id = $scenario_id,
+                            stores.scenario_name = $scenario_name,
+                            stores.capability = $capability,
+                            stores.label = "存储",
+                            stores.kind = "sync"
+                        """,
+                        capability=capability_name,
+                        store=store_name,
+                        singleton=store_name in singleton_components,
+                        scenario_id=scoped["id"],
+                        scenario_name=scoped["name"],
+                    )
 
         for quality, components in data.get("quality_components", {}).items():
             tx.run("MERGE (:QualityAttribute {name: $name})", name=quality)
@@ -384,26 +606,60 @@ class Neo4jAuraService:
         for source, target, label in data.get("dependencies", []):
             if source.startswith("*") or target.startswith("*"):
                 continue
-            tx.run(
-                """
-                MERGE (a:ArchitectureComponent {name: $source})
-                SET a.layer = $source_layer,
-                    a.singleton = $source_singleton
-                MERGE (b:ArchitectureComponent {name: $target})
-                SET b.layer = $target_layer,
-                    b.singleton = $target_singleton
-                MERGE (a)-[r:DEPENDS_ON]->(b)
-                SET r.label = $label, r.kind = $kind
-                """,
-                source=source,
-                target=target,
-                label=label,
-                kind="event" if "事件" in label or "通知" in label else "sync",
-                source_layer=component_layers.get(source, "业务服务层"),
-                target_layer=component_layers.get(target, "业务服务层"),
-                source_singleton=source in singleton_components,
-                target_singleton=target in singleton_components,
-            )
+            scoped = Neo4jAuraService._dependency_scopes(source, target, capabilities, capability_scenarios)
+            if not scoped:
+                continue
+            for scope in scoped:
+                if target in store_names:
+                    tx.run(
+                        """
+                        MERGE (a:ArchitectureComponent {name: $source})
+                        SET a.layer = $source_layer,
+                            a.singleton = $source_singleton
+                        MERGE (b:DataStore {name: $target})
+                        SET b.singleton = $target_singleton
+                        MERGE (a)-[r:STORES_IN]->(b)
+                        SET r.label = $label,
+                            r.kind = $kind,
+                            r.scenario_id = $scenario_id,
+                            r.scenario_name = $scenario_name,
+                            r.capability = $capability
+                        """,
+                        source=source,
+                        target=target,
+                        label=label,
+                        kind="event" if "事件" in label or "通知" in label else "sync",
+                        source_layer=component_layers.get(source, "业务服务层"),
+                        source_singleton=source in singleton_components,
+                        target_singleton=target in singleton_components,
+                        **scope,
+                    )
+                else:
+                    tx.run(
+                        """
+                        MERGE (a:ArchitectureComponent {name: $source})
+                        SET a.layer = $source_layer,
+                            a.singleton = $source_singleton
+                        MERGE (b:ArchitectureComponent {name: $target})
+                        SET b.layer = $target_layer,
+                            b.singleton = $target_singleton
+                        MERGE (a)-[r:DEPENDS_ON]->(b)
+                        SET r.label = $label,
+                            r.kind = $kind,
+                            r.scenario_id = $scenario_id,
+                            r.scenario_name = $scenario_name,
+                            r.capability = $capability
+                        """,
+                        source=source,
+                        target=target,
+                        label=label,
+                        kind="event" if "事件" in label or "通知" in label else "sync",
+                        source_layer=component_layers.get(source, "业务服务层"),
+                        target_layer=component_layers.get(target, "业务服务层"),
+                        source_singleton=source in singleton_components,
+                        target_singleton=target in singleton_components,
+                        **scope,
+                    )
 
     @staticmethod
     def _merge_topology_patch(tx, scenario_ids: list[str], scenario_name: str, patch: dict[str, Any]) -> None:
@@ -431,34 +687,55 @@ class Neo4jAuraService:
                     """
                     MATCH (s:DomainScenario {id: $scenario_id})
                     MATCH (c:BusinessCapability {name: $capability})
-                    MERGE (s)-[:REQUIRES]->(c)
+                    MERGE (s)-[r:REQUIRES]->(c)
+                    SET r.scenario_id = $scenario_id,
+                        r.scenario_name = $scenario_name
                     """,
                     scenario_id=scenario_id,
+                    scenario_name=scenario_name,
                     capability=capability_name,
                 )
             for component_name in capability.get("components", []):
-                tx.run(
-                    """
-                    MATCH (c:BusinessCapability {name: $capability})
-                    MERGE (component:ArchitectureComponent {name: $component})
-                    MERGE (c)-[:IMPLEMENTED_BY]->(component)
-                    """,
-                    capability=capability_name,
-                    component=component_name,
-                )
+                for scenario_id in scenario_ids:
+                    tx.run(
+                        """
+                        MATCH (c:BusinessCapability {name: $capability})
+                        MERGE (component:ArchitectureComponent {name: $component})
+                        MERGE (c)-[r:IMPLEMENTED_BY]->(component)
+                        SET r.scenario_id = $scenario_id,
+                            r.scenario_name = $scenario_name,
+                            r.capability = $capability
+                        """,
+                        capability=capability_name,
+                        component=component_name,
+                        scenario_id=scenario_id,
+                        scenario_name=scenario_name,
+                    )
             for store_name in capability.get("stores", []):
-                tx.run(
-                    """
-                    MATCH (c:BusinessCapability {name: $capability})
-                    MERGE (store:DataStore {name: $store})
-                    MERGE (c)-[:USES_STORE]->(store)
-                    WITH c, store
-                    MATCH (component:ArchitectureComponent)<-[:IMPLEMENTED_BY]-(c)
-                    MERGE (component)-[:STORES_IN]->(store)
-                    """,
-                    capability=capability_name,
-                    store=store_name,
-                )
+                for scenario_id in scenario_ids:
+                    tx.run(
+                        """
+                        MATCH (c:BusinessCapability {name: $capability})
+                        MERGE (store:DataStore {name: $store})
+                        MERGE (c)-[uses:USES_STORE]->(store)
+                        SET uses.scenario_id = $scenario_id,
+                            uses.scenario_name = $scenario_name,
+                            uses.capability = $capability
+                        WITH c, store
+                        MATCH (component:ArchitectureComponent)<-[impl:IMPLEMENTED_BY]-(c)
+                        WHERE impl.scenario_id = $scenario_id
+                        MERGE (component)-[stores:STORES_IN]->(store)
+                        SET stores.scenario_id = $scenario_id,
+                            stores.scenario_name = $scenario_name,
+                            stores.capability = $capability,
+                            stores.label = "存储",
+                            stores.kind = "sync"
+                        """,
+                        capability=capability_name,
+                        store=store_name,
+                        scenario_id=scenario_id,
+                        scenario_name=scenario_name,
+                    )
 
         for component_name in component_names:
             tx.run("MERGE (:ArchitectureComponent {name: $name})", name=component_name)
@@ -470,18 +747,92 @@ class Neo4jAuraService:
             target = edge.get("target")
             if not source or not target:
                 continue
-            tx.run(
-                """
-                MERGE (a:ArchitectureComponent {name: $source})
-                MERGE (b:ArchitectureComponent {name: $target})
-                MERGE (a)-[r:DEPENDS_ON]->(b)
-                SET r.label = $label, r.kind = $kind
-                """,
-                source=source,
-                target=target,
-                label=edge.get("label", "依赖"),
-                kind=edge.get("kind", "sync"),
+            for scenario_id in scenario_ids:
+                if target in store_names:
+                    tx.run(
+                        """
+                        MERGE (a:ArchitectureComponent {name: $source})
+                        MERGE (b:DataStore {name: $target})
+                        MERGE (a)-[r:STORES_IN]->(b)
+                        SET r.label = $label,
+                            r.kind = $kind,
+                            r.scenario_id = $scenario_id,
+                            r.scenario_name = $scenario_name,
+                            r.capability = $capability
+                        """,
+                        source=source,
+                        target=target,
+                        label=edge.get("label", "依赖"),
+                        kind=edge.get("kind", "sync"),
+                        scenario_id=scenario_id,
+                        scenario_name=scenario_name,
+                        capability=edge.get("capability", ""),
+                    )
+                else:
+                    tx.run(
+                        """
+                        MERGE (a:ArchitectureComponent {name: $source})
+                        MERGE (b:ArchitectureComponent {name: $target})
+                        MERGE (a)-[r:DEPENDS_ON]->(b)
+                        SET r.label = $label,
+                            r.kind = $kind,
+                            r.scenario_id = $scenario_id,
+                            r.scenario_name = $scenario_name,
+                            r.capability = $capability
+                        """,
+                        source=source,
+                        target=target,
+                        label=edge.get("label", "依赖"),
+                        kind=edge.get("kind", "sync"),
+                        scenario_id=scenario_id,
+                        scenario_name=scenario_name,
+                        capability=edge.get("capability", ""),
+                    )
+
+    @staticmethod
+    def _dependency_scopes(
+        source: str,
+        target: str,
+        capabilities: dict[str, Any],
+        capability_scenarios: dict[str, list[dict[str, str]]],
+    ) -> list[dict[str, str]]:
+        scenario_caps: dict[str, dict[str, Any]] = {}
+        for capability_name, spec in capabilities.items():
+            names = set(spec.get("components", [])) | set(spec.get("stores", []))
+            for scenario in capability_scenarios.get(capability_name, []):
+                scenario_caps.setdefault(
+                    scenario["id"],
+                    {"scenario_id": scenario["id"], "scenario_name": scenario["name"], "source_caps": [], "target_caps": []},
+                )
+                if source in names:
+                    scenario_caps[scenario["id"]]["source_caps"].append(capability_name)
+                if target in names:
+                    scenario_caps[scenario["id"]]["target_caps"].append(capability_name)
+
+        scopes: list[dict[str, str]] = []
+        for item in scenario_caps.values():
+            if not item["source_caps"] or not item["target_caps"]:
+                continue
+            scopes.append(
+                {
+                    "scenario_id": item["scenario_id"],
+                    "scenario_name": item["scenario_name"],
+                    "capability": item["source_caps"][0],
+                }
             )
+        return Neo4jAuraService._dedupe_scope_dicts(scopes)
+
+    @staticmethod
+    def _dedupe_scope_dicts(items: list[dict[str, str]]) -> list[dict[str, str]]:
+        seen = set()
+        result = []
+        for item in items:
+            key = (item.get("scenario_id", ""), item.get("capability", ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(item)
+        return result
 
     @staticmethod
     def _node_id(node) -> str:

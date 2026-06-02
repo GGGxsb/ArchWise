@@ -4,9 +4,8 @@ from collections.abc import AsyncGenerator
 
 from app.agents.architecture_matcher import ArchitectureMatcherAgent
 from app.agents.evaluation_generator import EvaluationGeneratorAgent
-from app.agents.requirement_parser import RequirementParserAgent
 from app.knowledge.repository import KnowledgeRepository
-from app.models.schemas import RecommendationResponse
+from app.models.schemas import CandidateEvaluation, ExtractedFeatures, RecommendationResponse
 from app.services.hybrid_orchestrator import HybridReasoningOrchestrator
 from app.services.knowledge_graph import KnowledgeGraphService
 from app.services.llm_client import LLMClient
@@ -16,14 +15,12 @@ from app.services.rule_engine import RuleEngine
 class RecommendationService:
     def __init__(self, repository: KnowledgeRepository | None = None) -> None:
         self.repository = repository or KnowledgeRepository()
-        self.parser = RequirementParserAgent()
         self.matcher = ArchitectureMatcherAgent()
         self.llm_client = LLMClient()
         self.evaluator = EvaluationGeneratorAgent(self.llm_client)
         self.rule_engine = RuleEngine()
         self.graph_service = KnowledgeGraphService()
         self.orchestrator = HybridReasoningOrchestrator(
-            parser=self.parser,
             matcher=self.matcher,
             evaluator=self.evaluator,
             llm_client=self.llm_client,
@@ -31,13 +28,44 @@ class RecommendationService:
             graph_service=self.graph_service,
         )
 
-    async def recommend(self, requirement: str, top_k: int = 3) -> RecommendationResponse:
+    async def recommend(
+        self,
+        requirement: str,
+        top_k: int = 3,
+        topology_options: dict | None = None,
+    ) -> RecommendationResponse:
         styles = self.repository.list_styles()
-        return await self.orchestrator.run(requirement, styles, top_k)
+        return await self.orchestrator.run(requirement, styles, top_k, topology_options=topology_options)
 
-    async def recommend_stream(self, requirement: str, top_k: int = 3) -> AsyncGenerator[str, None]:
+    async def recommend_stream(
+        self,
+        requirement: str,
+        top_k: int = 3,
+        topology_options: dict | None = None,
+    ) -> AsyncGenerator[str, None]:
         styles = self.repository.list_styles()
-        async for event in self.orchestrator.stream(requirement, styles, top_k):
+        async for event in self.orchestrator.stream(requirement, styles, top_k, topology_options=topology_options):
+            yield event
+
+    async def topology_stream(
+        self,
+        requirement: str,
+        features: ExtractedFeatures,
+        final_recommendation: CandidateEvaluation,
+        composition_recommendation: dict | None = None,
+        decision_trace: dict | None = None,
+        topology_options: dict | None = None,
+    ) -> AsyncGenerator[str, None]:
+        styles = self.repository.list_styles()
+        async for event in self.orchestrator.stream_topology(
+            requirement=requirement,
+            styles=styles,
+            features=features,
+            final_recommendation=final_recommendation,
+            composition_recommendation=composition_recommendation,
+            decision_trace=decision_trace,
+            topology_options=topology_options,
+        ):
             yield event
 
     @staticmethod

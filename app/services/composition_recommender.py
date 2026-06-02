@@ -65,13 +65,23 @@ class CompositionRecommender:
             and qualities.get("scalability", 0) < 0.5
             and qualities.get("data_intensity", 0) < 0.5
         )
+        capability_scope = len([item for item in features.business_capabilities if str(item).strip()])
+        small_scope = (
+            capability_scope <= 7
+            and qualities.get("concurrency", 0) < 0.6
+            and qualities.get("realtime", 0) < 0.6
+            and qualities.get("scalability", 0) < 0.65
+        )
         if simple_scale:
             warnings.append("需求规模和质量属性压力较低，组合架构可能带来过度设计。")
+
+        if small_scope:
+            warnings.append("业务能力范围较窄，优先单一架构更容易控制复杂度。")
 
         if features.domain in self.SIMPLE_DOMAINS and simple_scale:
             warnings.append("业务场景偏管理或 CRUD，单一分层/MVC/单体风格通常更经济。")
 
-        if len(candidates) >= 2 and candidates[0].score - candidates[1].score >= 12 and simple_scale:
+        if len(candidates) >= 2 and candidates[0].score - candidates[1].score >= 12 and (simple_scale or small_scope):
             warnings.append("第一候选优势明显，缺少引入辅助架构模式的必要性。")
 
         if warnings:
