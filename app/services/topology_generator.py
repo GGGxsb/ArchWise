@@ -111,14 +111,6 @@ class TopologyGenerator:
         "搜索索引", "特征库", "模型库", "服务注册", "监控服务", "审计服务", "配置中心",
     }
 
-    SOCIAL_KEYWORDS = ["社交", "发帖", "点赞", "评论", "私信", "内容推荐", "关注", "粉丝"]
-    EDUCATION_KEYWORDS = ["在线教育", "上课", "课程", "直播", "录播", "回放", "课后互动", "作业", "考试", "课堂"]
-    MEDIA_KEYWORDS = ["视频", "图片", "短视频", "转码", "直播", "录播"]
-    COMMERCE_KEYWORDS = ["电商", "商品", "购物车", "订单", "支付", "退款", "促销", "下单", "秒杀", "物流", "灰度", "交易"]
-    LAB_REAGENT_KEYWORDS = ["实验室", "试剂", "申领", "领用", "出库", "采购"]
-    IOT_KEYWORDS = ["设备", "传感器", "采集", "告警", "远程控制"]
-    AI_KEYWORDS = ["AI", "智能", "推荐算法", "生成", "大模型"]
-
     def generate(
         self,
         requirement: str,
@@ -128,34 +120,15 @@ class TopologyGenerator:
         graph_knowledge: dict | None = None,
         composition_recommendation: dict | None = None,
     ) -> tuple[str, list[str]]:
-        graph_knowledge = graph_knowledge or {}
-        composition_recommendation = composition_recommendation or {}
-        graph_primary = self._graph_coverage_sufficient(requirement, features, graph_knowledge, extra_capabilities or [])
-        capabilities = self._topology_capabilities(requirement, features, graph_knowledge, extra_capabilities or [], graph_primary)
-        capabilities.extend(extra_capabilities or [])
-        capabilities = list(dict.fromkeys(capabilities))
-        nodes, edges, notes = self._build_graph(capabilities, features, winner, graph_knowledge, composition_recommendation, graph_primary)
-        return self._render_mermaid(nodes, edges), notes
-
-    def generate_views(
-        self,
-        requirement: str,
-        features: ExtractedFeatures,
-        winner: CandidateEvaluation,
-        extra_capabilities: list[str] | None = None,
-        graph_knowledge: dict | None = None,
-        composition_recommendation: dict | None = None,
-    ) -> tuple[dict[str, str], list[str]]:
-        graph_knowledge = graph_knowledge or {}
-        composition_recommendation = composition_recommendation or {}
-        graph_primary = self._graph_coverage_sufficient(requirement, features, graph_knowledge, extra_capabilities or [])
-        capabilities = self._topology_capabilities(requirement, features, graph_knowledge, extra_capabilities or [], graph_primary)
-        capabilities.extend(extra_capabilities or [])
-        capabilities = list(dict.fromkeys(capabilities))
-        nodes, edges, notes = self._build_graph(capabilities, features, winner, graph_knowledge, composition_recommendation, graph_primary)
-        views = self._build_view_diagrams(nodes, edges)
-        notes.append("拓扑可视化：已生成总览、完整、业务链路、数据流和支撑设施多视图")
-        return views, notes
+        diagrams, _graphs, notes = self.generate_graph_views(
+            requirement,
+            features,
+            winner,
+            extra_capabilities=extra_capabilities,
+            graph_knowledge=graph_knowledge,
+            composition_recommendation=composition_recommendation,
+        )
+        return diagrams.get("完整图") or next(iter(diagrams.values()), "flowchart TD\n  empty[暂无拓扑]"), notes
 
     def generate_graph_views(
         self,
@@ -323,41 +296,6 @@ class TopologyGenerator:
         generic = {"业务处理", "数据处理", "消息处理", "系统管理", "服务处理", "通用能力"}
         return name.strip() in generic
 
-    @staticmethod
-    def _keyword_business_capabilities(text: str) -> list[str]:
-        rules = {
-            "商品浏览": ["商品浏览", "商品", "浏览", "搜索"],
-            "购物车": ["购物车"],
-            "订单管理": ["订单", "下单"],
-            "支付结算": ["支付", "结算"],
-            "库存管理": ["库存"],
-            "库存一致性": ["最终一致性", "一致性"],
-            "促销活动": ["促销"],
-            "秒杀活动": ["秒杀"],
-            "物流跟踪": ["物流", "轨迹"],
-            "退款售后": ["退款", "售后"],
-            "风控审计": ["风控", "审计", "安全"],
-            "灰度发布": ["灰度", "独立部署", "发布"],
-            "通知提醒": ["通知", "提醒"],
-            "商品管理": ["商品管理"],
-            "直播教学": ["直播"],
-            "录播回放": ["录播", "回放"],
-            "课堂互动": ["互动"],
-            "作业考试": ["作业", "考试"],
-            "内容发布": ["发帖", "内容发布"],
-            "互动行为": ["点赞", "评论", "互动"],
-            "私信通信": ["私信"],
-            "关注关系": ["关注", "关系"],
-            "信息流": ["信息流", "Feed", "推荐"],
-            "内容推荐": ["推荐算法", "内容推荐", "推荐"],
-            "内容审核": ["审核"],
-        }
-        result: list[str] = []
-        for capability, keywords in rules.items():
-            if any(keyword in text for keyword in keywords):
-                result.append(capability)
-        return result
-
     @classmethod
     def _components_for_capabilities(cls, capabilities: list[str]) -> list[str]:
         spec = cls._domain_topology_spec()
@@ -421,26 +359,6 @@ class TopologyGenerator:
             "missing": missing,
         }
 
-    @classmethod
-    def _scenario_capabilities(cls, text: str, domain: str) -> list[str]:
-        spec = cls._domain_topology_spec()
-        result: list[str] = []
-        if domain:
-            for scenario in spec.get("scenarios", []):
-                scenario_text = " ".join([scenario.get("id", ""), scenario.get("name", ""), " ".join(scenario.get("keywords", []))])
-                if domain == scenario.get("name") or domain in scenario_text:
-                    return list(dict.fromkeys(scenario.get("capabilities", [])))
-
-        scored_scenarios: list[tuple[int, list[str]]] = []
-        for scenario in spec.get("scenarios", []):
-            hits = sum(1 for keyword in scenario.get("keywords", []) if keyword in text)
-            if hits >= 2:
-                scored_scenarios.append((hits, scenario.get("capabilities", [])))
-        if scored_scenarios:
-            scored_scenarios.sort(key=lambda item: item[0], reverse=True)
-            result.extend(scored_scenarios[0][1])
-        return list(dict.fromkeys(result))
-
     @staticmethod
     @lru_cache(maxsize=1)
     def _domain_topology_spec() -> dict:
@@ -471,10 +389,11 @@ class TopologyGenerator:
             canonical_source = self._canonical_node_id(source)
             canonical_target = self._canonical_node_id(target)
             if canonical_source in nodes and canonical_target in nodes:
+                if self._is_invalid_topology_edge(canonical_source, canonical_target, nodes):
+                    return
                 edges.append(TopologyEdge(canonical_source, canonical_target, label, kind))
 
         self._ensure_base_infrastructure(features, add, notes, graph_primary)
-        self._add_llm_capability_nodes(capabilities, add)
         self._add_llm_expected_nodes(features, add)
 
         relevant_graph_knowledge = self._relevant_graph_knowledge(
@@ -497,12 +416,13 @@ class TopologyGenerator:
         self._connect_llm_expected_topology(features, nodes, link, notes)
         if graph_primary:
             self._connect_graph_services(nodes, edges, link, notes)
-        self._validate_and_repair_topology(capabilities, features, nodes, add, link, notes, graph_primary)
         nodes, edges = self._dedupe_graph(nodes, edges, notes)
         nodes, edges = self._prune_irrelevant_topology(capabilities, features, graph_knowledge, nodes, edges, notes, graph_primary)
+        edges = self._remove_invalid_topology_edges(nodes, edges, notes)
         if composition_recommendation.get("composition_needed"):
             self._apply_composition_architecture_topology(nodes, edges, winner, composition_recommendation, notes)
             nodes, edges = self._dedupe_graph(nodes, edges, notes)
+            edges = self._remove_invalid_topology_edges(nodes, edges, notes)
 
         return list(nodes.values()), edges, notes
 
@@ -622,14 +542,6 @@ class TopologyGenerator:
                 changed += 1
             return changed
 
-        if style_id == "serverless":
-            layer = f"{style_name}：弹性任务"
-            for node_id in targets:
-                if node_id in nodes:
-                    relayer(node_id, layer)
-                    changed += 1
-            return changed
-
         layer = f"{style_name}：局部结构"
         for node_id in targets:
             if node_id in nodes and nodes[node_id].layer == "业务服务层":
@@ -679,7 +591,7 @@ class TopologyGenerator:
         elif style_id == "pipe_filter":
             for node_id in ["transcode", "object_store", "media", "replay"]:
                 add_target(node_id)
-        elif style_id == "serverless":
+        elif style_id == "monolithic_layered":
             for node_id in ["notify", "transcode", "ai"]:
                 add_target(node_id)
 
@@ -709,7 +621,7 @@ class TopologyGenerator:
         if "管道" in name or "过滤器" in name or "流水线" in name:
             return "pipe_filter"
         if "Serverless" in name or "无服务器" in name:
-            return "serverless"
+            return "monolithic_layered"
         return ""
 
     @staticmethod
@@ -717,7 +629,7 @@ class TopologyGenerator:
         roles = {
             "event_driven": "核心：异步解耦与事件分发",
             "microservices": "核心：服务边界与独立部署",
-            "layered": "核心：分层治理与职责隔离",
+            "monolithic_layered": "核心：分层治理与职责隔离",
             "cqrs": "核心：读写分离与查询优化",
             "pipe_filter": "核心：流水线处理",
         }
@@ -734,116 +646,12 @@ class TopologyGenerator:
             return ["转码服务", "对象存储", "数据管道"]
         return [node.name for node in nodes.values() if node.layer in {"业务服务层", "异步事件层"}][:6]
 
-    def _add_local_capability_nodes(self, capabilities, add) -> None:
-        if "CDN" in capabilities:
-            add("cdn", "CDN", "接入层")
-        if "负载均衡" in capabilities:
-            add("lb", "负载均衡", "接入层")
-        if "用户" in capabilities:
-            add("user", "用户服务", "业务服务层")
-            add("user_db", "用户库", "数据层")
-        if "课程" in capabilities:
-            add("course", "课程服务", "业务服务层")
-            add("course_db", "课程库", "数据层")
-        if "直播" in capabilities:
-            add("live", "直播服务", "业务服务层")
-            add("live_gateway", "直播网关", "接入层")
-        if "录播" in capabilities:
-            add("replay", "回放服务", "业务服务层")
-            add("replay_db", "回放库", "数据层")
-        if "作业" in capabilities:
-            add("homework", "作业服务", "业务服务层")
-            add("homework_db", "作业库", "数据层")
-        if "考试" in capabilities:
-            add("exam", "考试服务", "业务服务层")
-            add("exam_db", "考试库", "数据层")
-        if "关系" in capabilities:
-            add("relation", "关系服务", "业务服务层")
-            add("graph_db", "关系图谱", "数据层")
-        if "内容" in capabilities:
-            add("content", "内容服务", "业务服务层")
-            add("content_db", "内容库", "数据层")
-            add("search", "搜索索引", "数据层")
-        if "互动" in capabilities:
-            add("interaction", "互动服务", "业务服务层")
-            add("interaction_db", "互动库", "数据层")
-        if "评论" in capabilities:
-            add("comment", "评论服务", "业务服务层")
-        if "私信" in capabilities:
-            add("message", "私信服务", "业务服务层")
-            add("message_db", "消息库", "数据层")
-        if "Feed" in capabilities:
-            add("feed", "Feed服务", "业务服务层")
-            add("feed_cache", "Feed缓存", "数据层")
-        if "推荐" in capabilities:
-            add("recommend", "推荐服务", "业务服务层")
-            add("feature_store", "特征库", "数据层")
-        if "审核" in capabilities:
-            add("moderation", "审核服务", "治理层")
-        if "通知" in capabilities:
-            add("notify", "通知服务", "业务服务层")
-        if "缓存" in capabilities:
-            add("cache", "缓存集群", "数据层")
-        if "消息队列" in capabilities or "事件总线" in capabilities:
-            add("event_bus", "事件总线", "异步事件层")
-        if "媒体" in capabilities:
-            add("media", "媒体服务", "业务服务层")
-        if "转码" in capabilities:
-            add("transcode", "转码服务", "异步事件层")
-        if "对象存储" in capabilities:
-            add("object_store", "对象存储", "数据层")
-        if "AI" in capabilities:
-            add("ai", "AI服务", "业务服务层")
-        if "商品" in capabilities:
-            add("product", "商品服务", "业务服务层")
-            add("product_db", "商品库", "数据层")
-            add("search", "搜索索引", "数据层")
-        if "购物车" in capabilities:
-            add("cart", "购物车服务", "业务服务层")
-            add("cart_cache", "购物车缓存", "数据层")
-        if "订单" in capabilities:
-            add("order", "订单服务", "业务服务层")
-            add("order_db", "订单库", "数据层")
-        if "支付" in capabilities:
-            add("payment", "支付服务", "业务服务层")
-            add("payment_db", "支付库", "数据层")
-        if "库存" in capabilities:
-            add("inventory", "库存服务", "业务服务层")
-            add("inventory_db", "库存库", "数据层")
-        if "促销" in capabilities:
-            add("promotion", "促销服务", "业务服务层")
-        if "秒杀" in capabilities:
-            add("flash_sale", "秒杀服务", "业务服务层")
-            add("event_bus", "事件总线", "异步事件层")
-            add("cache", "缓存集群", "数据层")
-        if "物流" in capabilities:
-            add("logistics", "物流服务", "业务服务层")
-            add("logistics_db", "物流库", "数据层")
-        if "退款" in capabilities:
-            add("refund", "退款服务", "业务服务层")
-        if "风控" in capabilities:
-            add("risk_control", "风控服务", "治理层")
-        if "灰度" in capabilities:
-            add("config_center", "配置中心", "治理层")
-            add("service_registry", "服务注册", "治理层")
-
     def _add_llm_expected_nodes(self, features: ExtractedFeatures, add) -> None:
-        expectations = features.topology_expectations or {}
-        for name in expectations.get("must_have_components", []):
-            clean_name = str(name).strip()
-            if clean_name:
-                add(self._component_id(clean_name), clean_name, self._component_layer(clean_name))
-
-    def _add_llm_capability_nodes(self, capabilities: list[str], add) -> None:
-        capability_map = self._domain_topology_spec().get("capabilities", {})
-        for capability in capabilities:
-            item = capability_map.get(capability)
-            if not item:
-                continue
-            for component in item.get("components", []):
-                add(self._component_id(component), component, self._component_layer(component))
-            for store in item.get("stores", []):
-                add(self._component_id(store), store, "数据层")
+        component_specs = self._component_specs(features)
+        if not component_specs:
+            return
+        for spec in component_specs:
+            add(self._component_id(spec["name"]), spec["name"], self._layer_from_llm(spec.get("layer", "")))
 
     def _connect_llm_expected_topology(
         self,
@@ -853,6 +661,17 @@ class TopologyGenerator:
         notes: list[str],
     ) -> None:
         expectations = features.topology_expectations or {}
+        for relation in self._relation_specs(features):
+            source = relation.get("source", "")
+            target = relation.get("target", "")
+            if source and target:
+                kind = relation.get("kind", "sync")
+                link(
+                    self._component_id(source),
+                    self._component_id(target),
+                    relation.get("label", "依赖"),
+                    "event" if kind == "event" else "sync",
+                )
         for relation in expectations.get("must_have_relations", []):
             text = str(relation).strip()
             if "->" not in text:
@@ -867,7 +686,65 @@ class TopologyGenerator:
         ]
         for service in service_nodes:
             link("gateway", service, "API")
-        notes.append("拓扑连接：已按 DeepSeek must_have_relations 和服务入口建立基础链路")
+        if self._component_specs(features):
+            notes.append("拓扑连接：已按 DeepSeek component_specs/relation_specs 和服务入口建立基础链路")
+        else:
+            notes.append("拓扑结构提示：DeepSeek 未返回 component_specs，后端未按本地规则猜测组件层级")
+
+    @staticmethod
+    def _component_specs(features: ExtractedFeatures) -> list[dict[str, str]]:
+        specs = []
+        for item in (features.topology_expectations or {}).get("component_specs", []):
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "")).strip()
+            if not name:
+                continue
+            specs.append(
+                {
+                    "name": name,
+                    "type": str(item.get("type", "service")).strip() or "service",
+                    "layer": str(item.get("layer", "business")).strip() or "business",
+                    "owned_by": str(item.get("owned_by", "")).strip(),
+                }
+            )
+        return specs
+
+    @staticmethod
+    def _relation_specs(features: ExtractedFeatures) -> list[dict[str, str]]:
+        specs = []
+        for item in (features.topology_expectations or {}).get("relation_specs", []):
+            if not isinstance(item, dict):
+                continue
+            source = str(item.get("source", "")).strip()
+            target = str(item.get("target", "")).strip()
+            if not source or not target:
+                continue
+            specs.append(
+                {
+                    "source": source,
+                    "target": target,
+                    "label": str(item.get("label", "依赖")).strip() or "依赖",
+                    "kind": str(item.get("kind", "sync")).strip() or "sync",
+                }
+            )
+        return specs
+
+    @staticmethod
+    def _layer_from_llm(layer: str) -> str:
+        mapping = {
+            "access": "接入层",
+            "gateway": "接入层",
+            "presentation": "表现层",
+            "business": "业务服务层",
+            "service": "业务服务层",
+            "data": "数据层",
+            "event": "异步事件层",
+            "event_bus": "异步事件层",
+            "governance": "治理层",
+            "infrastructure": "治理层",
+        }
+        return mapping.get(str(layer).strip(), str(layer).strip() or "业务服务层")
 
     def _apply_graph_knowledge(self, graph_knowledge, nodes, edges, add, link, notes) -> None:
         components = graph_knowledge.get("components", [])
@@ -879,7 +756,7 @@ class TopologyGenerator:
         notes.append("拓扑图谱增强：已从 Neo4j 检索领域能力、组件和依赖关系")
         for component in components:
             node_id = self._component_id(component)
-            add(node_id, component, self._component_layer(component))
+            add(node_id, component, "业务服务层")
         for store in stores:
             node_id = self._component_id(store)
             add(node_id, store, "数据层")
@@ -1073,170 +950,6 @@ class TopologyGenerator:
         link("media", "replay", "回放")
         link("cache", "live", "热点")
         link("cdn", "live_gateway", "分发")
-
-    def _validate_social(self, capabilities, nodes, add, link, notes) -> None:
-        if "社交" not in capabilities:
-            return
-        required = {
-            "feed": ("Feed服务", "业务服务层"),
-            "relation": ("关系服务", "业务服务层"),
-            "moderation": ("审核服务", "治理层"),
-            "feature_store": ("特征库", "数据层"),
-            "event_bus": ("事件总线", "异步事件层"),
-        }
-        for node_id, (name, layer) in required.items():
-            if node_id not in nodes:
-                add(node_id, name, layer)
-                notes.append(f"拓扑规则补全：社交媒体场景需要{name}")
-        link("content", "event_bus", "发布", "event")
-        link("interaction", "event_bus", "行为", "event")
-        link("event_bus", "feed", "更新", "event")
-        link("event_bus", "recommend", "训练", "event")
-        link("moderation", "content", "审核")
-
-    def _validate_education(self, capabilities, nodes, add, link, notes) -> None:
-        if "教育" not in capabilities:
-            return
-        required = {
-            "course": ("课程服务", "业务服务层"),
-            "live": ("直播服务", "业务服务层"),
-            "live_gateway": ("直播网关", "接入层"),
-            "replay": ("回放服务", "业务服务层"),
-            "interaction": ("互动服务", "业务服务层"),
-            "media": ("媒体服务", "业务服务层"),
-            "object_store": ("对象存储", "数据层"),
-            "event_bus": ("事件总线", "异步事件层"),
-            "cache": ("缓存集群", "数据层"),
-            "cdn": ("CDN", "接入层"),
-        }
-        for node_id, (name, layer) in required.items():
-            if node_id not in nodes:
-                add(node_id, name, layer)
-                notes.append(f"拓扑规则补全：在线教育场景需要{name}")
-
-        if "录播" in capabilities and "transcode" not in nodes:
-            add("transcode", "转码服务", "异步事件层")
-            notes.append("拓扑规则补全：录播回放需要转码服务")
-        if "课后互动" in capabilities and "notify" not in nodes:
-            add("notify", "通知服务", "业务服务层")
-
-        link("client", "cdn", "访问")
-        link("cdn", "live_gateway", "直播分发")
-        link("live_gateway", "live", "推流")
-        link("gateway", "course", "课程")
-        link("gateway", "interaction", "互动")
-        link("live", "event_bus", "课堂事件", "event")
-        link("interaction", "event_bus", "互动事件", "event")
-        link("event_bus", "replay", "生成回放", "event")
-        link("event_bus", "notify", "课后通知", "event")
-        link("live", "media", "音视频")
-        link("media", "object_store", "存储")
-        link("transcode", "object_store", "录播")
-        link("replay", "object_store", "读取")
-        link("cache", "live", "热点加速")
-
-    def _validate_commerce(self, capabilities, nodes, add, link, notes) -> None:
-        capability_text = " ".join(capabilities)
-        if not any(item in capability_text for item in ["电商", "商品", "购物车", "订单", "支付", "库存", "秒杀", "物流"]):
-            return
-        required = {
-            "product": ("商品服务", "业务服务层"),
-            "product_db": ("商品库", "数据层"),
-            "cart": ("购物车服务", "业务服务层"),
-            "cart_cache": ("购物车缓存", "数据层"),
-            "order": ("订单服务", "业务服务层"),
-            "order_db": ("订单库", "数据层"),
-            "payment": ("支付服务", "业务服务层"),
-            "payment_db": ("支付库", "数据层"),
-            "inventory": ("库存服务", "业务服务层"),
-            "inventory_db": ("库存库", "数据层"),
-            "event_bus": ("事件总线", "异步事件层"),
-            "cache": ("缓存集群", "数据层"),
-            "monitoring": ("监控服务", "治理层"),
-        }
-        if "秒杀" in capability_text:
-            required["flash_sale"] = ("秒杀服务", "业务服务层")
-        if "物流" in capability_text:
-            required["logistics"] = ("物流服务", "业务服务层")
-            required["logistics_db"] = ("物流库", "数据层")
-        if "促销" in capability_text:
-            required["promotion"] = ("促销服务", "业务服务层")
-        if "退款" in capability_text:
-            required["refund"] = ("退款服务", "业务服务层")
-        if "风控" in capability_text:
-            required["risk_control"] = ("风控服务", "治理层")
-        if "灰度" in capability_text:
-            required["config_center"] = ("配置中心", "治理层")
-            required["service_registry"] = ("服务注册", "治理层")
-
-        for node_id, (name, layer) in required.items():
-            if node_id not in nodes:
-                add(node_id, name, layer)
-                notes.append(f"拓扑规则补全：电商交易场景需要{name}")
-
-        link("gateway", "product", "商品")
-        link("gateway", "cart", "购物车")
-        link("gateway", "order", "下单")
-        link("gateway", "payment", "支付")
-        link("gateway", "inventory", "库存")
-        link("product", "product_db", "商品")
-        link("product", "search", "检索")
-        link("cart", "cart_cache", "缓存")
-        link("order", "order_db", "订单")
-        link("order", "payment", "支付")
-        link("order", "inventory", "扣库存")
-        link("payment", "payment_db", "交易")
-        link("inventory", "inventory_db", "库存")
-        link("order", "event_bus", "订单事件", "event")
-        link("inventory", "event_bus", "库存事件", "event")
-        link("event_bus", "notify", "通知", "event")
-        link("cache", "product", "热点")
-        link("cache", "cart", "热点")
-        if "flash_sale" in nodes:
-            link("gateway", "flash_sale", "秒杀")
-            link("flash_sale", "cache", "热点库存")
-            link("flash_sale", "event_bus", "削峰", "event")
-            link("event_bus", "order", "异步下单", "event")
-        if "promotion" in nodes:
-            link("gateway", "promotion", "促销")
-            link("promotion", "cache", "活动缓存")
-        if "logistics" in nodes:
-            link("event_bus", "logistics", "物流通知", "event")
-            link("logistics", "logistics_db", "轨迹")
-        if "refund" in nodes:
-            link("gateway", "refund", "售后")
-            link("refund", "order_db", "订单")
-        if "risk_control" in nodes:
-            link("risk_control", "payment", "风控")
-        if "config_center" in nodes and "service_registry" in nodes:
-            link("config_center", "service_registry", "灰度配置")
-
-    def _validate_and_repair_topology(self, capabilities, features, nodes, add, link, notes, graph_primary: bool) -> None:
-        repairs = []
-        qualities = features.quality_attributes
-        if qualities.get("concurrency", 0) >= 0.75:
-            for node_id, name, layer in [("lb", "负载均衡", "接入层"), ("cache", "缓存集群", "数据层"), ("event_bus", "事件总线", "异步事件层")]:
-                if node_id not in nodes:
-                    add(node_id, name, layer)
-                    repairs.append(node_id)
-            link("lb", "gateway", "路由")
-        if qualities.get("reliability", 0) >= 0.7:
-            for node_id, name in [("monitoring", "监控服务"), ("audit", "审计服务")]:
-                if node_id not in nodes:
-                    add(node_id, name, "治理层")
-                    repairs.append(node_id)
-        if qualities.get("scalability", 0) >= 0.7 and "service_registry" not in nodes:
-            add("service_registry", "服务注册", "治理层")
-            repairs.append("service_registry")
-
-        commerce_caps = {"商品浏览", "商品管理", "购物车", "订单管理", "支付结算", "库存管理", "库存一致性", "秒杀活动", "物流跟踪"}
-        if commerce_caps & set(capabilities):
-            expected = ["product", "cart", "order", "payment", "inventory"]
-            covered = sum(1 for node_id in expected if node_id in nodes)
-            notes.append(f"拓扑自检：电商核心能力覆盖率 {covered}/{len(expected)}")
-
-        if repairs:
-            notes.append("拓扑质量属性补齐：根据 DeepSeek 质量属性补充 " + "、".join(dict.fromkeys(repairs)))
 
     def _prune_irrelevant_topology(
         self,
@@ -1584,6 +1297,34 @@ class TopologyGenerator:
     def _has_edge(edges: list[TopologyEdge], source: str, target: str) -> bool:
         return any(edge.source == source and edge.target == target for edge in edges)
 
+    @classmethod
+    def _remove_invalid_topology_edges(
+        cls,
+        nodes: dict[str, TopologyNode],
+        edges: list[TopologyEdge],
+        notes: list[str],
+    ) -> list[TopologyEdge]:
+        valid_edges = [
+            edge for edge in edges
+            if not cls._is_invalid_topology_edge(edge.source, edge.target, nodes)
+        ]
+        removed_count = len(edges) - len(valid_edges)
+        if removed_count:
+            notes.append(f"拓扑边校验：已移除 API 网关直连数据存储等非法连线 {removed_count} 条")
+        return valid_edges
+
+    @staticmethod
+    def _is_invalid_topology_edge(source: str, target: str, nodes: dict[str, TopologyNode]) -> bool:
+        source_node = nodes.get(source)
+        target_node = nodes.get(target)
+        if not source_node or not target_node:
+            return False
+        if source == "gateway" and target_node.layer == "数据层":
+            return True
+        if source_node.layer == "接入层" and target_node.layer == "数据层":
+            return True
+        return False
+
     @staticmethod
     def _should_emit_event(node_id: str) -> bool:
         return node_id not in {"user", "course"}
@@ -1619,13 +1360,3 @@ class TopologyGenerator:
     @classmethod
     def _is_singleton(cls, name: str) -> bool:
         return name in cls.SINGLETON_COMPONENTS or name in cls.CANONICAL_COMPONENT_IDS
-
-    @staticmethod
-    def _component_layer(name: str) -> str:
-        if name in ["CDN", "负载均衡", "API网关", "直播网关", "设备网关", "视频网关"]:
-            return "接入层"
-        if name in ["消息队列", "事件总线", "任务队列", "数据管道", "实时计算", "离线分析", "转码服务"]:
-            return "异步事件层"
-        if name in ["审核服务", "审计服务", "风控服务", "防作弊服务", "监控服务", "配置中心"]:
-            return "治理层"
-        return "业务服务层"

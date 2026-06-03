@@ -4,28 +4,25 @@ from collections.abc import AsyncGenerator
 
 from app.agents.architecture_matcher import ArchitectureMatcherAgent
 from app.agents.evaluation_generator import EvaluationGeneratorAgent
+from app.agents.requirement_parser import RequirementParserAgent
 from app.knowledge.repository import KnowledgeRepository
 from app.models.schemas import CandidateEvaluation, ExtractedFeatures, RecommendationResponse
 from app.services.hybrid_orchestrator import HybridReasoningOrchestrator
-from app.services.knowledge_graph import KnowledgeGraphService
 from app.services.llm_client import LLMClient
-from app.services.rule_engine import RuleEngine
 
 
 class RecommendationService:
     def __init__(self, repository: KnowledgeRepository | None = None) -> None:
         self.repository = repository or KnowledgeRepository()
-        self.matcher = ArchitectureMatcherAgent()
         self.llm_client = LLMClient()
+        self.requirement_parser = RequirementParserAgent(self.llm_client)
+        self.matcher = ArchitectureMatcherAgent()
         self.evaluator = EvaluationGeneratorAgent(self.llm_client)
-        self.rule_engine = RuleEngine()
-        self.graph_service = KnowledgeGraphService()
         self.orchestrator = HybridReasoningOrchestrator(
             matcher=self.matcher,
             evaluator=self.evaluator,
+            requirement_parser=self.requirement_parser,
             llm_client=self.llm_client,
-            rule_engine=self.rule_engine,
-            graph_service=self.graph_service,
         )
 
     async def recommend(

@@ -1,8 +1,5 @@
 const requirementEl = document.querySelector("#requirement");
 const topKEl = document.querySelector("#topK");
-const topologyModeEl = document.querySelector("#topologyMode");
-const topologyTimeoutEl = document.querySelector("#topologyTimeout");
-const topologyRoundsEl = document.querySelector("#topologyRounds");
 const btn = document.querySelector("#recommendBtn");
 const statusEl = document.querySelector("#status");
 const winnerEl = document.querySelector("#winner");
@@ -81,7 +78,7 @@ async function recommend() {
     statusEl.textContent = "请输入需求";
     return;
   }
-  const topK = Number(topKEl.value || 12);
+  const topK = Number(topKEl.value || 6);
   statusEl.textContent = "分析中...";
   btn.disabled = true;
   resetRecommendationView();
@@ -111,13 +108,7 @@ async function recommend() {
 }
 
 function readTopologyOptions() {
-  const fastMode = (topologyModeEl?.value || "fast") === "fast";
-  const timeoutValue = topologyTimeoutEl?.value ?? "12";
-  return {
-    topology_fast_mode: fastMode,
-    topology_llm_timeout_seconds: Number(timeoutValue),
-    topology_repair_max_rounds: Number(topologyRoundsEl?.value || 1),
-  };
+  return {};
 }
 
 function resetRecommendationView() {

@@ -9,7 +9,14 @@ from urllib.parse import urlparse
 
 import httpx
 
-from app.models.schemas import CandidateEvaluation, ExtractedFeatures
+from app.models.schemas import (
+    CandidateEvaluation,
+    ComponentDef,
+    ConnectionDef,
+    ExtractedFeatures,
+    StyleInstance,
+    StyleSchema,
+)
 
 _DEFAULT_TIMEOUT = object()
 
@@ -109,9 +116,10 @@ class LLMClient:
             "约束：\n"
             f"1. candidates 必须返回 {candidate_count} 个。\n"
             "2. style_id 必须来自候选架构知识库，不能编造。\n"
-            "3. 简单低并发 CRUD/审批/库存类系统不要过度推荐微服务或事件驱动。\n"
-            "4. 高并发、强实时、最终一致性、独立部署等需求可以推荐微服务、事件驱动或 CQRS。\n"
-            "5. score 必须拉开合理差距，不要所有架构都给 100。\n\n"
+            "3. 简单架构能实现的需求就不应考虑复杂架构。分层、MVC、单体等方案能胜任时，不应为了「架构看起来先进」而引入微服务、事件驱动、CQRS 等重型方案。优先选择能满足需求的最简架构。\n"
+            "4. 每个推荐方案必须深度评估技术债和长期维护成本：引入的复杂度代价、团队规模匹配度、数据一致性代价、部署与调试成本。\n"
+            "5. 只有在高并发、强实时、多团队独立交付、或最终一致性等硬需求明确存在时，才可以推荐微服务、事件驱动或 CQRS。\n"
+            "6. score 必须拉开合理差距，不要所有架构都给 100。\n\n"
             f"用户需求：{requirement}\n"
             f"结构化特征：{features.model_dump_json()}\n"
             f"候选架构知识库：{json.dumps(style_payload, ensure_ascii=False)}\n"
@@ -163,81 +171,6 @@ class LLMClient:
         async for chunk in self._stream_chat(payload):
             yield chunk
 
-    async def generate_topology(
-        self,
-        requirement: str,
-        features: ExtractedFeatures,
-        winner: CandidateEvaluation,
-    ) -> str | None:
-        if not self.api_key:
-            return None
-
-        prompt = (
-            "请根据本次软件需求和最终推荐架构，生成一张定制化 Mermaid 架构拓扑图。\n"
-            "只返回 Mermaid 源码，不要 Markdown 代码块，不要解释。\n"
-            "要求：\n"
-            "1. 使用 flowchart LR 或 flowchart TD。\n"
-            "2. 节点必须体现本需求中的业务模块、数据存储、消息/事件通道、外部客户端或第三方服务。\n"
-            "3. 节点文字使用中文，控制在 2-8 个字。\n"
-            "4. 不要使用括号、引号、emoji 或特殊符号，避免 Mermaid 渲染失败。\n\n"
-            f"需求：{requirement}\n"
-            f"抽取特征：{features.model_dump_json()}\n"
-            f"最终推荐：{winner.model_dump()}\n"
-        )
-        payload: dict[str, Any] = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": "你是软件架构图生成 Agent，只输出合法 Mermaid flowchart 源码。"},
-                {"role": "user", "content": prompt},
-            ],
-            "thinking": {"type": "disabled"},
-            "temperature": 0.2,
-            "stream": False,
-            "max_tokens": 1000,
-        }
-        content = await self._chat(payload)
-        if not content:
-            return None
-        return self._sanitize_mermaid(content)
-
-    async def extract_capabilities(
-        self,
-        requirement: str,
-        features: ExtractedFeatures,
-    ) -> list[str]:
-        if not self.api_key:
-            return []
-
-        prompt = (
-            "请从软件需求中提取架构拓扑所需的业务能力模块，只返回 JSON，不要 Markdown。\n"
-            "格式：{\"capabilities\":[\"能力1\",\"能力2\"]}\n"
-            "能力名称使用 2-6 个中文字符，优先返回业务能力，不要返回抽象质量属性。\n"
-            "例如社交媒体应包含 Feed、关系、内容、互动、评论、私信、推荐、审核。\n\n"
-            f"需求：{requirement}\n"
-            f"特征：{features.model_dump_json()}\n"
-        )
-        payload: dict[str, Any] = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": "你是架构能力识别 Agent，只输出 JSON。"},
-                {"role": "user", "content": prompt},
-            ],
-            "thinking": {"type": "disabled"},
-            "temperature": 0.1,
-            "stream": False,
-            "response_format": {"type": "json_object"},
-            "max_tokens": 800,
-        }
-        content = await self._chat(payload)
-        if not content:
-            return []
-        try:
-            data = self._extract_json(content)
-            capabilities = data.get("capabilities", [])
-            return [str(item).strip() for item in capabilities if str(item).strip()]
-        except Exception:
-            return []
-
     async def extract_features(
         self,
         requirement: str,
@@ -258,8 +191,8 @@ class LLMClient:
         strict_rules = (
             "严格补充要求：\n"
             "1. 必须从用户需求中按业务动作拆出 4 到 8 个业务能力，例如录入、查询、选择、下单、审核、核验、扣费、统计、提醒等。\n"
-            "2. topology_expectations.must_have_components 必须覆盖每个业务能力对应的服务组件和数据存储。\n"
-            "3. topology_expectations.must_have_relations 必须体现主要业务链路，例如录入->库存、下单->订单、归还->核验、扣费->记录。\n"
+            "2. topology_expectations.component_specs 必须覆盖每个业务能力对应的服务组件和数据存储，并为每个组件明确 type、layer、owned_by。\n"
+            "3. topology_expectations.relation_specs 必须体现主要业务链路，例如录入->库存、服务->数据存储、事件发布/订阅等。\n"
             "4. 不能只返回订单服务、库存服务这类过少组件；对租借、领用、预约、审批、归还、扣费、统计等普通业务系统也要完整拆分。\n\n"
             if strict
             else ""
@@ -271,13 +204,16 @@ class LLMClient:
             "JSON 字段必须为：domain, keywords, business_capabilities, architecture_drivers, topology_expectations, quality_attributes, constraints, data_flow, ambiguity_notes。\n"
             "business_capabilities 必须是具体业务能力，不要写“业务处理”“数据处理”等泛化词；应覆盖用户、商家、管理员等角色的关键业务动作。\n"
             "architecture_drivers 表示影响架构选型的驱动因素，例如高并发、弹性伸缩、最终一致性、灰度发布。\n"
-            "topology_expectations 必须包含 must_have_components, must_have_relations, quality_infrastructure 三个数组；must_have_components 要包含业务服务和对应数据存储。\n"
+            "topology_expectations 必须包含 must_have_components, must_have_relations, quality_infrastructure, component_specs, relation_specs。\n"
+            "component_specs 数组项格式：{\"name\":\"组件名\",\"type\":\"service|data_store|gateway|infrastructure|event_bus|cache|external\",\"layer\":\"access|business|data|event|governance\",\"owned_by\":\"所属服务名或空字符串\"}。\n"
+            "relation_specs 数组项格式：{\"source\":\"源组件\",\"target\":\"目标组件\",\"label\":\"关系说明\",\"kind\":\"sync|event|data\"}。\n"
+            "数据库、台账、记录、缓存等数据存储必须由 DeepSeek 在 component_specs 中标注为 type=data_store/layer=data，并通过 relation_specs 连接到所属业务服务，不能连接到 API 网关。\n"
             "quality_attributes 必须包含 concurrency, realtime, reliability, scalability, data_intensity, ai_reasoning，值为 0 到 1。\n"
             "data_flow 只能是 event_stream, pipeline, transactional, request_response 之一。\n"
             "constraints 至少包含 scale_mentions, deployment, requires_high_availability, requires_future_extension。\n\n"
             f"{strict_rules}"
             "示例 JSON：\n"
-            "{\"domain\":\"电商交易\",\"keywords\":[\"秒杀\",\"支付\",\"库存\"],\"business_capabilities\":[\"商品浏览\",\"购物车\",\"订单管理\",\"支付结算\",\"库存一致性\",\"秒杀活动\",\"物流跟踪\"],\"architecture_drivers\":[\"高并发\",\"弹性伸缩\",\"最终一致性\",\"灰度发布\"],\"topology_expectations\":{\"must_have_components\":[\"订单服务\",\"支付服务\",\"库存服务\",\"秒杀服务\",\"消息队列\"],\"must_have_relations\":[\"订单服务->支付服务\",\"订单服务->库存服务\",\"秒杀服务->消息队列\"],\"quality_infrastructure\":[\"负载均衡\",\"缓存集群\",\"监控服务\"]},\"quality_attributes\":{\"concurrency\":0.95,\"realtime\":0.4,\"reliability\":0.85,\"scalability\":0.9,\"data_intensity\":0.65,\"ai_reasoning\":0},\"constraints\":{\"scale_mentions\":[\"每秒数万笔订单\"],\"deployment\":[\"微服务\",\"独立部署\",\"灰度发布\"],\"requires_high_availability\":true,\"requires_future_extension\":true},\"data_flow\":\"transactional\",\"ambiguity_notes\":[]}\n\n"
+            "{\"domain\":\"电商交易\",\"keywords\":[\"秒杀\",\"支付\",\"库存\"],\"business_capabilities\":[\"商品浏览\",\"购物车\",\"订单管理\",\"支付结算\",\"库存一致性\",\"秒杀活动\",\"物流跟踪\"],\"architecture_drivers\":[\"高并发\",\"弹性伸缩\",\"最终一致性\",\"灰度发布\"],\"topology_expectations\":{\"must_have_components\":[\"订单服务\",\"订单数据库\",\"支付服务\",\"支付数据库\",\"库存服务\",\"库存数据库\",\"秒杀服务\",\"消息队列\"],\"must_have_relations\":[\"订单服务->支付服务\",\"订单服务->库存服务\",\"订单服务->订单数据库\",\"支付服务->支付数据库\",\"库存服务->库存数据库\",\"秒杀服务->消息队列\"],\"quality_infrastructure\":[\"负载均衡\",\"缓存集群\",\"监控服务\"],\"component_specs\":[{\"name\":\"订单服务\",\"type\":\"service\",\"layer\":\"business\",\"owned_by\":\"\"},{\"name\":\"订单数据库\",\"type\":\"data_store\",\"layer\":\"data\",\"owned_by\":\"订单服务\"},{\"name\":\"支付服务\",\"type\":\"service\",\"layer\":\"business\",\"owned_by\":\"\"},{\"name\":\"支付数据库\",\"type\":\"data_store\",\"layer\":\"data\",\"owned_by\":\"支付服务\"},{\"name\":\"库存服务\",\"type\":\"service\",\"layer\":\"business\",\"owned_by\":\"\"},{\"name\":\"库存数据库\",\"type\":\"data_store\",\"layer\":\"data\",\"owned_by\":\"库存服务\"},{\"name\":\"秒杀服务\",\"type\":\"service\",\"layer\":\"business\",\"owned_by\":\"\"},{\"name\":\"消息队列\",\"type\":\"event_bus\",\"layer\":\"event\",\"owned_by\":\"\"}],\"relation_specs\":[{\"source\":\"订单服务\",\"target\":\"支付服务\",\"label\":\"支付\",\"kind\":\"sync\"},{\"source\":\"订单服务\",\"target\":\"订单数据库\",\"label\":\"读写\",\"kind\":\"data\"},{\"source\":\"支付服务\",\"target\":\"支付数据库\",\"label\":\"读写\",\"kind\":\"data\"},{\"source\":\"库存服务\",\"target\":\"库存数据库\",\"label\":\"读写\",\"kind\":\"data\"},{\"source\":\"秒杀服务\",\"target\":\"消息队列\",\"label\":\"发布事件\",\"kind\":\"event\"}]},\"quality_attributes\":{\"concurrency\":0.95,\"realtime\":0.4,\"reliability\":0.85,\"scalability\":0.9,\"data_intensity\":0.65,\"ai_reasoning\":0},\"constraints\":{\"scale_mentions\":[\"每秒数万笔订单\"],\"deployment\":[\"微服务\",\"独立部署\",\"灰度发布\"],\"requires_high_availability\":true,\"requires_future_extension\":true},\"data_flow\":\"transactional\",\"ambiguity_notes\":[]}\n\n"
             "待解析输入：\n"
             f"{json.dumps({'requirement': requirement}, ensure_ascii=False)}\n"
         )
@@ -301,7 +237,7 @@ class LLMClient:
         try:
             data = self._extract_json(content)
             features = ExtractedFeatures(**data)
-            features = self._strengthen_topology_expectations(features)
+            features = self._normalize_topology_expectations(features)
             if not self._features_consistent_with_requirement(requirement, features):
                 self.last_error = "DeepSeek 需求解析结果与输入不一致：输入需求非空，但模型返回了空需求或未提取到有效业务特征。"
                 return None
@@ -310,35 +246,122 @@ class LLMClient:
             self.last_error = f"DeepSeek 需求解析 JSON 校验失败：{exc}"
             return None
 
-    async def review_candidates(
+    # ── Style-aware topology extraction ──────────────────────────
+
+    async def extract_style_instance(
         self,
         requirement: str,
         features: ExtractedFeatures,
-        candidates: list[CandidateEvaluation],
-    ) -> list[str]:
+        schema: StyleSchema,
+        composition_mode: bool = False,
+    ) -> StyleInstance | None:
+        """Ask the LLM to fill a StyleInstance by mapping domain components to
+        the layers declared in *schema*, with connections obeying the style's
+        connection rules.
+
+        Returns None when the LLM is unavailable or returns unparseable JSON.
+        """
         if not self.api_key:
-            return []
+            return None
+
+        layers_desc = "\n".join(
+            f"  - {layer.layer_id}（{layer.label}）：{layer.description}"
+            f"{' [单例，只能有1个组件]' if layer.singleton else ''}"
+            f"{'，至少' + str(layer.min_components) + '个组件' if layer.min_components > 1 else ''}"
+            for layer in schema.layers
+        )
+        connection_desc = "\n".join(
+            f"  - {rule.source_layer} → {rule.target_layer}（{rule.kind}）：{rule.label}"
+            + (" [禁止跨层]" if not rule.allow_skip else "")
+            for rule in schema.layer_connections[:12]
+        )
 
         prompt = (
-            "请作为架构评审 Agent，复核候选架构排序是否合理。只返回 3 条以内中文短句，指出补充理由或风险，不要改分。\n\n"
-            f"需求：{requirement}\n"
-            f"特征：{features.model_dump_json()}\n"
-            f"候选：{[item.model_dump() for item in candidates]}\n"
+            f"你是架构拓扑实例化 Agent。当前推荐的架构风格是「{schema.style_name}」。\n"
+            "请根据用户需求，将具体业务组件填充到该风格的层结构中，并定义组件间连接。\n"
+            "只返回 JSON，不要 Markdown，不要解释。\n\n"
+            f"风格结构说明：\n{layers_desc}\n\n"
+            f"连接规则：\n{connection_desc}\n\n"
+            f"风格约束提示：{schema.prompt_hints}\n\n"
+            "JSON Schema：\n"
+            "{\n"
+            '  "style_id": "风格ID",\n'
+            '  "components": [\n'
+            '    {"name": "组件中文名", "layer_id": "所属层ID", "component_type": "service|data_store|gateway|event_bus|cache|external|infrastructure"}\n'
+            "  ],\n"
+            '  "connections": [\n'
+            '    {"source": "源组件名", "target": "目标组件名", "kind": "sync|event|data", "label": "关系说明"}\n'
+            "  ],\n"
+            '  "notes": "一句话设计说明"\n'
+            "}\n\n"
+            "严格要求：\n"
+            "1. 组件名使用 2-8 个中文字符，必须体现具体业务职能。\n"
+            "2. 每个 mandatory 层至少有一个组件，单例层不超过一个。\n"
+            "3. 连接必须遵守上面的连接规则，不要违反禁止跨层的约束。\n"
+            "4. 数据存储（数据库、缓存、台账等）必须标注 component_type=data_store。\n"
+            "5. 不要编造不在需求中的组件，但可以补充必要的基础设施组件。\n\n"
+            f"用户需求：{requirement}\n"
+            f"结构化特征：{features.model_dump_json()}\n"
         )
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": [
-                {"role": "system", "content": "你是谨慎的软件体系结构评审专家，输出简洁可追溯的复核意见。"},
+                {"role": "system", "content": f"你是「{schema.style_name}」拓扑实例化 Agent，只输出可解析 JSON。"},
                 {"role": "user", "content": prompt},
             ],
             "thinking": {"type": "disabled"},
-            "temperature": 0.2,
+            "temperature": 0.1,
             "stream": False,
+            "response_format": {"type": "json_object"},
+            "max_tokens": 2000 if composition_mode else 1600,
         }
         content = await self._chat(payload)
         if not content:
-            return []
-        return [line.strip("- 1234567890.、") for line in content.splitlines() if line.strip()][:3]
+            return None
+        try:
+            data = self._extract_json(content)
+            return self._parse_style_instance(data, schema.style_id)
+        except Exception as exc:
+            self.last_error = f"StyleInstance JSON 解析失败：{exc}"
+            return None
+
+    @staticmethod
+    def _parse_style_instance(data: dict[str, Any], expected_style_id: str) -> StyleInstance:
+        components: list[ComponentDef] = []
+        for item in data.get("components", []):
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "")).strip()
+            if not name:
+                continue
+            components.append(ComponentDef(
+                name=name,
+                layer_id=str(item.get("layer_id", "")).strip(),
+                component_type=str(item.get("component_type", "service")).strip() or "service",
+            ))
+
+        connections: list[ConnectionDef] = []
+        for item in data.get("connections", []):
+            if not isinstance(item, dict):
+                continue
+            source = str(item.get("source", "")).strip()
+            target = str(item.get("target", "")).strip()
+            if not source or not target:
+                continue
+            kind = str(item.get("kind", "sync")).strip()
+            connections.append(ConnectionDef(
+                source=source,
+                target=target,
+                kind=kind if kind in {"sync", "event", "data"} else "sync",
+                label=str(item.get("label", "")).strip(),
+            ))
+
+        return StyleInstance(
+            style_id=data.get("style_id", expected_style_id),
+            components=components,
+            connections=connections,
+            notes=str(data.get("notes", "")).strip(),
+        )
 
     async def propose_topology_knowledge_patch(
         self,
@@ -738,7 +761,7 @@ class LLMClient:
         return not (empty_notes or empty_result)
 
     @staticmethod
-    def _strengthen_topology_expectations(features: ExtractedFeatures) -> ExtractedFeatures:
+    def _normalize_topology_expectations(features: ExtractedFeatures) -> ExtractedFeatures:
         expectations = features.topology_expectations or {}
         components = [
             str(item).strip()
@@ -755,27 +778,13 @@ class LLMClient:
             for item in expectations.get("quality_infrastructure", [])
             if str(item).strip()
         ]
-        capabilities = [
-            str(item).strip()
-            for item in features.business_capabilities
-            if str(item).strip()
-        ]
-
-        for capability in capabilities:
-            compact = re.sub(r"(管理|处理|记录|创建|选择|核验|统计|提醒|审核|录入|扣费|归还|下单)$", "", capability).strip()
-            base = compact or capability
-            service_name = capability if capability.endswith("服务") else f"{base}服务"
-            store_name = capability if capability.endswith(("库", "数据库", "缓存", "索引")) else f"{base}库"
-            if not any(base in item or capability in item for item in components):
-                components.append(service_name)
-                components.append(store_name)
-
-        service_components = [
-            item for item in components
-            if item.endswith("服务") and item not in {"API网关", "监控服务", "审计服务"}
-        ]
-        for left, right in zip(service_components, service_components[1:]):
-            relation = f"{left}->{right}"
+        component_specs = LLMClient._sanitize_component_specs(expectations.get("component_specs", []))
+        relation_specs = LLMClient._sanitize_relation_specs(expectations.get("relation_specs", []))
+        for item in component_specs:
+            if item["name"] not in components:
+                components.append(item["name"])
+        for item in relation_specs:
+            relation = f"{item['source']}->{item['target']}"
             if relation not in relations:
                 relations.append(relation)
 
@@ -783,8 +792,58 @@ class LLMClient:
             "must_have_components": list(dict.fromkeys(components))[:24],
             "must_have_relations": list(dict.fromkeys(relations))[:24],
             "quality_infrastructure": list(dict.fromkeys(quality_infrastructure))[:12],
+            "component_specs": component_specs[:32],
+            "relation_specs": relation_specs[:40],
         }
         return features.model_copy(update={"topology_expectations": normalized})
+
+    @staticmethod
+    def _sanitize_component_specs(items: Any) -> list[dict[str, str]]:
+        if not isinstance(items, list):
+            return []
+        allowed_types = {"service", "data_store", "gateway", "infrastructure", "event_bus", "cache", "external"}
+        allowed_layers = {"access", "business", "data", "event", "governance"}
+        result: list[dict[str, str]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "")).strip()
+            if not name:
+                continue
+            component_type = str(item.get("type", "service")).strip()
+            layer = str(item.get("layer", "business")).strip()
+            result.append(
+                {
+                    "name": name,
+                    "type": component_type if component_type in allowed_types else "service",
+                    "layer": layer if layer in allowed_layers else "business",
+                    "owned_by": str(item.get("owned_by", "")).strip(),
+                }
+            )
+        return result
+
+    @staticmethod
+    def _sanitize_relation_specs(items: Any) -> list[dict[str, str]]:
+        if not isinstance(items, list):
+            return []
+        result: list[dict[str, str]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            source = str(item.get("source", "")).strip()
+            target = str(item.get("target", "")).strip()
+            if not source or not target:
+                continue
+            kind = str(item.get("kind", "sync")).strip()
+            result.append(
+                {
+                    "source": source,
+                    "target": target,
+                    "label": str(item.get("label", "依赖")).strip() or "依赖",
+                    "kind": kind if kind in {"sync", "event", "data"} else "sync",
+                }
+            )
+        return result
 
     async def _chat(
         self,
@@ -883,15 +942,3 @@ class LLMClient:
             end = content.rfind("}")
             content = content[start : end + 1] if start >= 0 and end >= start else content
         return json.loads(content)
-
-    @staticmethod
-    def _sanitize_mermaid(content: str) -> str:
-        fenced = re.search(r"```(?:mermaid)?\s*(.*?)\s*```", content, flags=re.S)
-        if fenced:
-            content = fenced.group(1)
-        lines = [line.rstrip() for line in content.strip().splitlines() if line.strip()]
-        if not lines:
-            return ""
-        if not lines[0].startswith("flowchart"):
-            lines.insert(0, "flowchart LR")
-        return "\n".join(lines)

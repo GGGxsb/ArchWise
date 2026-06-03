@@ -1,10 +1,18 @@
+"""Agent 2: Architecture style matching and LLM-result validation.
+
+This agent has two responsibilities:
+1. Local feature-based scoring (`match`) — deterministic, rule-driven baseline
+2. Post-LLM consistency validation (`validate_llm_results`) — compares LLM output
+   against local scoring and flags over-engineering or ranking conflicts
+"""
+
 from __future__ import annotations
 
 from app.models.schemas import ArchitectureStyle, CandidateEvaluation, ExtractedFeatures
 
 
 class ArchitectureMatcherAgent:
-    """Agent 2: match extracted features with architecture style knowledge."""
+    """Scores architecture styles against extracted features, and validates LLM output."""
 
     ATTRIBUTE_MAP = {
         "concurrency": ["scalability", "performance"],
@@ -16,45 +24,121 @@ class ArchitectureMatcherAgent:
     }
 
     FLOW_BONUS = {
-        "event_stream": {"event_driven": 0.22, "microservices": 0.12, "cqrs": 0.08, "serverless": 0.05},
-        "pipeline": {"pipe_filter": 0.28, "serverless": 0.08, "microservices": 0.06},
-        "transactional": {"layered": 0.08, "microservices": 0.06, "cqrs": 0.12, "soa": 0.06},
-        "request_response": {"layered": 0.1, "mvc": 0.08, "hexagonal": 0.05},
+        "event_stream": {"event_driven": 0.22, "microservices": 0.12, "cqrs": 0.08},
+        "pipeline": {"pipe_filter": 0.28, "microservices": 0.06},
+        "transactional": {"monolithic_layered": 0.08, "microservices": 0.06, "cqrs": 0.12},
+        "request_response": {"monolithic_layered": 0.14, "hexagonal": 0.05},
     }
 
     FLOW_PRIORITY = {
-        "event_stream": {"event_driven": 4, "microservices": 3, "cqrs": 2, "serverless": 1},
-        "pipeline": {"pipe_filter": 4, "serverless": 2, "microservices": 1},
-        "transactional": {"cqrs": 3, "layered": 2, "microservices": 1},
-        "request_response": {"layered": 3, "mvc": 2, "hexagonal": 1},
+        "event_stream": {"event_driven": 4, "microservices": 3, "cqrs": 2},
+        "pipeline": {"pipe_filter": 4, "microservices": 1},
+        "transactional": {"cqrs": 3, "monolithic_layered": 2, "microservices": 1},
+        "request_response": {"monolithic_layered": 3, "hexagonal": 1},
     }
+
+    # ────────────────────── Local Scoring ──────────────────────────────────
 
     def match(
         self,
         features: ExtractedFeatures,
         styles: list[ArchitectureStyle],
         top_k: int = 3,
-        preferred_style_ids: list[str] | None = None,
-        rejected_style_ids: list[str] | None = None,
     ) -> list[CandidateEvaluation]:
-        preferred_style_ids = preferred_style_ids or []
-        rejected_style_ids = rejected_style_ids or []
-        candidates = [
-            self._score_style(features, style, preferred_style_ids, rejected_style_ids)
-            for style in styles
-        ]
+        """Score every style against extracted features and return top_k candidates."""
+        candidates = [self._score_style(features, style) for style in styles]
         priority = self.FLOW_PRIORITY.get(features.data_flow, {})
         candidates.sort(key=lambda item: (item.raw_score, priority.get(item.style_id, 0)), reverse=True)
         selected = candidates[:top_k]
         self._normalize_scores(selected)
         return selected
 
+    # ─────────────────── Post-LLM Validation ───────────────────────────────
+
+    def validate_llm_results(
+        self,
+        features: ExtractedFeatures,
+        llm_candidates: list[CandidateEvaluation],
+        styles: list[ArchitectureStyle],
+    ) -> tuple[list[CandidateEvaluation], list[str]]:
+        """Run local scoring and compare against LLM output.
+
+        Returns the (possibly adjusted) LLM candidates and a list of human-readable
+        consistency notes for the trace panel.
+        """
+        notes: list[str] = []
+
+        # 1. Run local scoring as a baseline
+        local_candidates = self.match(features, styles, max(len(llm_candidates), 3))
+        local_map: dict[str, CandidateEvaluation] = {c.style_id: c for c in local_candidates}
+        local_rank = {c.style_id: i for i, c in enumerate(local_candidates)}
+
+        # 2. Compare top pick
+        llm_top = llm_candidates[0]
+        local_top = local_candidates[0]
+
+        if llm_top.style_id != local_top.style_id:
+            local_score_for_llm_top = local_map.get(llm_top.style_id)
+            if local_score_for_llm_top and local_score_for_llm_top.score < local_top.score - 8:
+                notes.append(
+                    f"Agent 一致性校验：LLM 首选 {llm_top.name}({llm_top.score}分)，"
+                    f"本地特征评分显示 {local_top.name}({local_top.score}分) 更适配。"
+                    f"LLM 推荐置信度下调，建议人工复核。"
+                )
+                llm_top.confidence = self._downgrade_confidence(llm_top.confidence)
+                risk_note = (
+                    f"本地特征评分与该推荐存在分歧（本地首选 {local_top.name}），建议对比两方案后决策"
+                )
+                if risk_note not in llm_top.risks:
+                    llm_top.risks.append(risk_note)
+
+        # 3. Over-engineering detection
+        qa = features.quality_attributes
+        simple_system = (
+            qa.get("concurrency", 0) <= 0.35
+            and qa.get("realtime", 0) <= 0.35
+            and qa.get("scalability", 0) <= 0.45
+            and len(features.business_capabilities) <= 8
+        )
+        heavy_styles = {"microservices", "event_driven", "cqrs"}
+
+        if simple_system:
+            for c in llm_candidates:
+                if c.style_id in heavy_styles and c.recommendation_role in (
+                    "核心推荐",
+                    "核心推荐/组合候选",
+                ):
+                    notes.append(
+                        f"Agent 过度设计预警：需求规模较小"
+                        f"（业务能力 {len(features.business_capabilities)} 项，"
+                        f"并发 {qa.get('concurrency', 0):.2f}，"
+                        f"实时性 {qa.get('realtime', 0):.2f}），"
+                        f"但 LLM 将重型架构 {c.name} 列为 {c.recommendation_role}。"
+                    )
+                    if "本地特征分析提示该架构可能过度设计" not in c.risks:
+                        c.risks.append("本地特征分析提示该架构可能过度设计，简单架构或已足够")
+                    if "需求规模与架构复杂度不匹配" not in c.deductions:
+                        c.deductions.append("需求规模与架构复杂度不匹配")
+
+        # 4. Missing simple-style consideration
+        simple_styles = {"monolithic_layered"}
+        if simple_system and not any(c.style_id in simple_styles for c in llm_candidates[:3]):
+            notes.append(
+                "Agent 提示：当前需求规模偏小，但前三位候选均不包含分层/MVC/单体等简单架构，"
+                "建议考虑是否过度设计。"
+            )
+
+        return llm_candidates, notes
+
+    @staticmethod
+    def _downgrade_confidence(current: str) -> str:
+        order = {"高": "中高", "中高": "中", "中": "中低", "中低": "低"}
+        return order.get(current, "中")
+
     def _score_style(
         self,
         features: ExtractedFeatures,
         style: ArchitectureStyle,
-        preferred_style_ids: list[str],
-        rejected_style_ids: list[str],
     ) -> CandidateEvaluation:
         score = 0.0
         reasons: list[str] = []
@@ -95,15 +179,6 @@ class ArchitectureMatcherAgent:
         if style.quality_scores.get("complexity", 1) < 0.45:
             risks.append("实现与运维复杂度较高，需要配套治理能力")
             deductions.append("工程治理复杂度较高")
-
-        if style.id in preferred_style_ids:
-            score += 0.14
-            reasons.append("规则引擎或知识图谱将该风格列为优先候选")
-
-        if style.id in rejected_style_ids:
-            score -= 0.35
-            risks.append("规则引擎硬约束认为该风格不适合作为优先方案")
-            deductions.append("触发规则引擎排除或降权")
 
         score += self._context_fit_adjustment(features, style, deductions, risks)
 
@@ -166,7 +241,7 @@ class ArchitectureMatcherAgent:
             deductions.append("业务能力范围较小，微服务拆分收益不足")
             risks.append("当前需求规模偏小，微服务会放大部署和治理成本")
 
-        if features.data_flow == "event_stream" and style.id not in {"event_driven", "microservices", "cqrs", "serverless"}:
+        if features.data_flow == "event_stream" and style.id not in {"event_driven", "microservices", "cqrs"}:
             adjustment -= 0.1
             deductions.append("事件流场景适配度不足")
 
@@ -174,7 +249,7 @@ class ArchitectureMatcherAgent:
             adjustment -= 0.05
             deductions.append("流水线处理不是该风格核心优势")
 
-        if features.data_flow == "transactional" and style.id in {"event_driven", "serverless", "blackboard"}:
+        if features.data_flow == "transactional" and style.id in {"event_driven", "blackboard"}:
             adjustment -= 0.06
             deductions.append("强事务场景需要额外一致性设计")
 
@@ -183,7 +258,7 @@ class ArchitectureMatcherAgent:
             and qualities.get("realtime", 0) <= 0.25
             and qualities.get("scalability", 0) <= 0.35
         )
-        if simple_system and style.id in {"microservices", "event_driven", "cqrs", "soa", "clean"}:
+        if simple_system and style.id in {"microservices", "event_driven", "cqrs"}:
             adjustment -= 0.16
             deductions.append("需求规模较小，采用该风格可能过度设计")
             risks.append("团队需要承担不必要的拆分和治理成本")

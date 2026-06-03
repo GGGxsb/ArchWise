@@ -279,7 +279,7 @@ def test_topology_does_not_add_composition_layer_when_not_needed():
     mermaid, notes = TopologyGenerator().generate(
         requirement,
         features,
-        candidate("layered", "分层架构"),
+        candidate("monolithic_layered", "单体分层架构"),
         composition_recommendation=composition,
     )
 
@@ -349,9 +349,7 @@ def test_ecommerce_coverage_uses_business_capabilities_not_generic_components():
     assert "dimensions" in coverage
 
 
-def test_ecommerce_graph_topology_repairs_partial_neo4j_result():
-    requirement = "电商平台支持商品浏览、购物车、下单支付、库存最终一致性、物流跟踪和秒杀活动"
-    features = features_for(
+
         "电商交易",
         ["电商", "商品浏览", "购物车", "订单", "支付", "库存", "秒杀", "物流"],
         ["商品浏览", "购物车", "订单管理", "支付结算", "库存管理", "库存一致性", "秒杀活动", "物流跟踪"],
@@ -438,7 +436,7 @@ def test_low_coverage_neo4j_does_not_override_llm_topology_expectations():
     mermaid, notes = TopologyGenerator().generate(
         requirement,
         features,
-        candidate("layered", "分层架构"),
+        candidate("monolithic_layered", "单体分层架构"),
         graph_knowledge=graph_knowledge,
     )
 
@@ -451,3 +449,63 @@ def test_low_coverage_neo4j_does_not_override_llm_topology_expectations():
     assert "利润报表服务" in mermaid
     assert "数据仓库" not in mermaid
     assert "数据管道" not in mermaid
+
+
+def test_api_gateway_does_not_connect_to_llm_expected_databases():
+    requirement = "画室课时管理软件，登记学员报名课程与剩余课时，每次上课签到自动扣减课时，统计老师每月授课总课时与薪资"
+    features = features_for(
+        "课时管理",
+        ["课程", "教师", "学员", "报名", "缴费", "签到", "课时", "薪资"],
+        ["课程管理", "教师管理", "学员报名缴费", "学员签到扣课时", "教师课时薪资统计"],
+        {"reliability": 0.7, "data_intensity": 0.55},
+        "transactional",
+        {
+            "must_have_components": [
+                "课程服务",
+                "教师服务",
+                "学生服务",
+                "报名缴费服务",
+                "签到服务",
+                "课时服务",
+                "薪资统计服务",
+                "课程数据库",
+                "教师数据库",
+                "学生数据库",
+                "报名缴费数据库",
+                "签到数据库",
+                "课时数据库",
+                "薪资统计数据库",
+            ],
+            "must_have_relations": [
+                "课程服务->课程数据库",
+                "教师服务->教师数据库",
+                "报名缴费服务->报名缴费数据库",
+                "签到服务->签到数据库",
+                "课时服务->课时数据库",
+                "薪资统计服务->薪资统计数据库",
+            ],
+            "quality_infrastructure": ["监控服务"],
+        },
+    )
+
+    diagrams, graphs, notes = TopologyGenerator().generate_graph_views(
+        requirement,
+        features,
+        candidate("monolithic_layered", "单体分层架构"),
+    )
+    graph = graphs["完整图"]
+    node_by_id = {node["id"]: node for node in graph["nodes"]}
+    edges = graph["edges"]
+
+    data_nodes = {
+        node["id"]
+        for node in graph["nodes"]
+        if node["label"] in {"课程数据库", "教师数据库", "报名缴费数据库", "签到数据库", "课时数据库", "薪资统计数据库"}
+    }
+
+    assert data_nodes
+    assert all(node_by_id[node_id]["layer"] == "数据层" for node_id in data_nodes)
+    assert not [edge for edge in edges if edge["source"] == "gateway" and edge["target"] in data_nodes]
+    assert any(edge["source"] == TopologyGenerator._component_id("课程服务") and edge["target"] == TopologyGenerator._component_id("课程数据库") for edge in edges)
+    assert any(edge["source"] == TopologyGenerator._component_id("报名缴费服务") and edge["target"] == TopologyGenerator._component_id("报名缴费数据库") for edge in edges)
+    assert "拓扑数据归属修复" in " ".join(notes) or "拓扑连接" in " ".join(notes)

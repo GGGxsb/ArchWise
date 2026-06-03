@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import time
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
@@ -10,14 +9,20 @@ from typing import Any
 
 from app.agents.architecture_matcher import ArchitectureMatcherAgent
 from app.agents.evaluation_generator import EvaluationGeneratorAgent
-from app.models.schemas import ArchitectureStyle, CandidateEvaluation, ExtractedFeatures, RecommendationResponse
+from app.agents.requirement_parser import RequirementParserAgent
+from app.knowledge.style_schemas import get_schema
+from app.models.schemas import (
+    ArchitectureStyle,
+    CandidateEvaluation,
+    ExtractedFeatures,
+    RecommendationResponse,
+    StyleInstance,
+)
 from app.services.composition_recommender import CompositionRecommender
 from app.services.exceptions import DeepSeekServiceError, RequirementParsingError
-from app.services.knowledge_graph import KnowledgeGraphService
 from app.services.llm_client import LLMClient
 from app.services.report_formatter import ReportFormatter
-from app.services.rule_engine import RuleEngine
-from app.services.topology_generator import TopologyGenerator
+from app.services.style_topology_renderer import StyleTopologyRenderer
 
 
 @dataclass
@@ -29,33 +34,23 @@ class ReasoningContext:
     trace: list[str]
     decision_trace: dict[str, Any]
     composition_recommendation: dict[str, Any]
-    topology_fast_mode: bool
-    topology_llm_timeout_seconds: float | None
-    topology_repair_max_rounds: int
 
 
 class HybridReasoningOrchestrator:
-    """LangChain-style chain orchestration for rules + LLM + knowledge graph reasoning."""
-
-    TOPOLOGY_COVERAGE_THRESHOLD = 0.75
-    TOPOLOGY_REPAIR_MAX_ROUNDS = int(os.getenv("TOPOLOGY_REPAIR_MAX_ROUNDS", "1"))
-    TOPOLOGY_LLM_TIMEOUT_SECONDS = float(os.getenv("TOPOLOGY_LLM_TIMEOUT_SECONDS", "12"))
-    TOPOLOGY_FAST_MODE = os.getenv("TOPOLOGY_FAST_MODE", "true").lower() not in {"0", "false", "no", "off"}
+    """LangChain-style chain orchestration for LLM + agent reasoning."""
 
     def __init__(
         self,
         matcher: ArchitectureMatcherAgent,
         evaluator: EvaluationGeneratorAgent,
+        requirement_parser: RequirementParserAgent,
         llm_client: LLMClient,
-        rule_engine: RuleEngine,
-        graph_service: KnowledgeGraphService,
     ) -> None:
         self.matcher = matcher
         self.evaluator = evaluator
+        self.requirement_parser = requirement_parser
         self.llm_client = llm_client
-        self.rule_engine = rule_engine
-        self.graph_service = graph_service
-        self.topology_generator = TopologyGenerator()
+        self.style_renderer = StyleTopologyRenderer()
         self.composition_recommender = CompositionRecommender()
 
     async def run(
@@ -70,11 +65,7 @@ class HybridReasoningOrchestrator:
         candidates, composition, review_notes = await self._match_with_deepseek(ctx, features, top_k)
 
         report = await self.evaluator.generate(requirement, features, candidates, ctx.style_map)
-        if not report:
-            message = self.llm_client.last_error or "DeepSeek 未返回可用评估报告。"
-            ctx.trace.append(f"评估生成 Agent 终止：{message}")
-            raise DeepSeekServiceError(f"评估报告生成失败：{message}")
-        ctx.trace.append("评估生成 Agent 完成 DeepSeek 报告生成")
+        ctx.trace.append("评估生成 Agent 完成报告生成")
 
         matrix = [self._matrix_row(item) for item in candidates]
         ctx.decision_trace = self._build_decision_trace(
@@ -242,454 +233,81 @@ class HybridReasoningOrchestrator:
         )
         yield self._sse("done", {"ok": True})
 
-    async def _resolve_topology_task(
-        self,
-        topology_task: asyncio.Task[dict[str, Any]],
-        ctx: ReasoningContext,
-        features: ExtractedFeatures,
-        candidates: list[CandidateEvaluation],
-    ) -> dict[str, Any]:
-        try:
-            return await topology_task
-        except Exception as exc:
-            ctx.trace.append(f"拓扑生成任务异常，使用结构化基础拓扑兜底：{exc}")
-            topology_diagrams, topology_graphs, notes = self.topology_generator.generate_graph_views(
-                ctx.requirement,
-                features,
-                candidates[0],
-                extra_capabilities=[],
-                graph_knowledge={},
-                composition_recommendation=ctx.composition_recommendation,
-            )
-            ctx.trace.extend(notes)
-            return {
-                "diagrams": {f"{candidates[0].name}{name}": diagram for name, diagram in topology_diagrams.items()},
-                "graphs": {f"{candidates[0].name}{name}": graph for name, graph in topology_graphs.items()},
-            }
-
     async def _build_topologies(
         self,
         ctx: ReasoningContext,
         features: ExtractedFeatures,
         candidates: list[CandidateEvaluation],
-        topology_prep_task: asyncio.Task[tuple[dict[str, Any], list[dict[str, Any]], list[str]]] | None = None,
     ) -> dict[str, Any]:
-        if topology_prep_task is None:
-            graph_knowledge, repair_trace, topology_capabilities = await self._prepare_topology_knowledge(ctx, features)
-        else:
-            graph_knowledge, repair_trace, topology_capabilities = await topology_prep_task
-        topology_diagrams, topology_graphs, notes = self.topology_generator.generate_graph_views(
-            ctx.requirement,
-            features,
-            candidates[0],
-            extra_capabilities=topology_capabilities,
-            graph_knowledge=graph_knowledge,
-            composition_recommendation=ctx.composition_recommendation,
-        )
-        if topology_capabilities:
-            ctx.trace.append("DeepSeek 主解析拓扑业务能力：" + "、".join(topology_capabilities[:8]))
-        if graph_knowledge.get("scenarios"):
-            ctx.trace.append("Neo4j 拓扑知识命中场景：" + "、".join(graph_knowledge["scenarios"][:5]))
-        if graph_knowledge.get("capabilities"):
-            ctx.trace.append("Neo4j 拓扑知识命中能力：" + "、".join(graph_knowledge["capabilities"][:8]))
-        ctx.decision_trace["topology_evidence"] = {
-            "scenarios": graph_knowledge.get("scenarios", []),
-            "capabilities": graph_knowledge.get("capabilities", []),
-            "components": graph_knowledge.get("components", []),
-            "stores": graph_knowledge.get("stores", []),
-            "notes": notes,
-            "react_repair": repair_trace,
-        }
-        ctx.trace.extend(notes)
-        ctx.trace.append("拓扑生成器基于领域能力和规则校验生成结构化可交互拓扑")
-        return {
-            "diagrams": {f"{candidates[0].name}{name}": diagram for name, diagram in topology_diagrams.items()},
-            "graphs": {f"{candidates[0].name}{name}": graph for name, graph in topology_graphs.items()},
-        }
+        """Generate topology diagrams via LLM-driven StyleSchema rendering."""
+        winner = candidates[0]
+        style_schema = get_schema(winner.style_id)
 
-    async def _prepare_topology_knowledge(
-        self,
-        ctx: ReasoningContext,
-        features: ExtractedFeatures,
-    ) -> tuple[dict[str, Any], list[dict[str, Any]], list[str]]:
-        started = time.perf_counter()
-        topology_capabilities = [
-            str(item).strip()
-            for item in features.business_capabilities
-            if str(item).strip()
-        ]
-        retrieve_started = time.perf_counter()
-        graph_knowledge = await asyncio.to_thread(
-            self.graph_service.retrieve_topology_knowledge,
-            ctx.requirement,
-            features,
-        )
-        ctx.trace.append(f"拓扑耗时：Neo4j 知识检索 {time.perf_counter() - retrieve_started:.1f}s")
-        repair_started = time.perf_counter()
-        graph_knowledge, repair_trace = await self._repair_topology_knowledge(
-            ctx,
-            features,
-            graph_knowledge,
-            topology_capabilities,
-        )
-        ctx.trace.append(f"拓扑耗时：LLM 补全与临时合并 {time.perf_counter() - repair_started:.1f}s")
-        ctx.trace.append(f"拓扑耗时：知识准备总计 {time.perf_counter() - started:.1f}s")
-        return graph_knowledge, repair_trace, topology_capabilities
+        if not style_schema or not self.llm_client.api_key:
+            ctx.trace.append("拓扑生成跳过：缺少 StyleSchema 或 LLM API Key")
+            return {"diagrams": {}, "graphs": {}}
 
-    async def _repair_topology_knowledge(
-        self,
-        ctx: ReasoningContext,
-        features: ExtractedFeatures,
-        graph_knowledge: dict,
-        llm_capabilities: list[str],
-    ) -> tuple[dict, list[dict[str, Any]]]:
-        repair_trace: list[dict[str, Any]] = []
-        current_graph = graph_knowledge
-
-        gap_started = time.perf_counter()
         try:
-            gap_patch = await self._maybe_wait_for(
-                self.llm_client.review_topology_coverage_gap(
-                    ctx.requirement,
-                    features,
-                    current_graph,
-                    request_timeout=ctx.topology_llm_timeout_seconds,
-                ),
-                ctx.topology_llm_timeout_seconds,
-            )
-        except TimeoutError:
-            gap_patch = None
-            timeout_label = self._timeout_label(ctx.topology_llm_timeout_seconds)
-            repair_trace.append(
-                {
-                    "round": 0,
-                    "action": "llm_gap_review_timeout",
-                    "message": f"拓扑完整性复核超过 {timeout_label}，已跳过以保证响应速度。",
-                }
-            )
-        ctx.trace.append(f"拓扑耗时：DeepSeek 漏项复核 {time.perf_counter() - gap_started:.1f}s")
-        if gap_patch and self._patch_has_write_items(gap_patch):
-            before_coverage = self.topology_generator.assess_coverage(
-                ctx.requirement,
-                features,
-                current_graph,
-                extra_capabilities=llm_capabilities,
-            )
-            trial_patch = gap_patch
-            current_graph = self.topology_generator.merge_knowledge_patch(current_graph, trial_patch)
-            after_coverage = self.topology_generator.assess_coverage(
-                ctx.requirement,
-                features,
-                current_graph,
-                extra_capabilities=llm_capabilities,
-            )
-            if ctx.topology_fast_mode:
-                neo4j_result = {
-                    "ok": False,
-                    "skipped": True,
-                    "reason": "拓扑快速模式：补丁已临时用于本次架构图，跳过 embedding 规范化和 Neo4j 写入。",
-                }
-            elif self._patch_has_write_items(trial_patch):
-                self._schedule_background_topology_write(
-                    ctx,
-                    features,
-                    trial_patch,
-                    graph_knowledge,
-                    before_coverage,
-                    "漏项复核补丁",
-                )
-                neo4j_result = {
-                    "ok": False,
-                    "pending": True,
-                    "reason": "知识库进化已转入后台：embedding 规范化通过后再写入 Neo4j。",
-                }
-            else:
-                neo4j_result = {
-                    "ok": False,
-                    "skipped": True,
-                    "reason": "补丁没有达到永久写入条件的节点或关系。",
-                }
-            repair_trace.append(
-                {
-                    "round": 0,
-                    "action": "llm_gap_review_merged",
-                    "raw_patch": gap_patch,
-                    "trial_patch": trial_patch,
-                    "write_patch": trial_patch if not ctx.topology_fast_mode else {},
-                    "normalization": [],
-                    "temporary_items": [],
-                    "semantic_available": None,
-                    "neo4j": neo4j_result,
-                    "coverage_before": before_coverage,
-                    "coverage_after": after_coverage,
-                }
-            )
-            gap_components = list(trial_patch.get("components", [])) + list(trial_patch.get("stores", []))
-            ctx.trace.append(
-                "拓扑完整性复核：DeepSeek 对照原始需求补充漏项 "
-                + ("、".join(gap_components[:8]) if gap_components else "见能力映射")
-            )
-
-        for round_index in range(1, ctx.topology_repair_max_rounds + 1):
-            coverage = self.topology_generator.assess_coverage(
-                ctx.requirement,
-                features,
-                current_graph,
-                extra_capabilities=llm_capabilities,
-            )
-            repair_trace.append(
-                {
-                    "round": round_index,
-                    "action": "coverage_check",
-                    "coverage": coverage,
-                }
-            )
-            missing_items = self._coverage_missing_items(coverage)
-            if not self._coverage_requires_repair(coverage):
-                break
-
-            patch_started = time.perf_counter()
-            try:
-                patch = await self._maybe_wait_for(
-                    self.llm_client.propose_topology_knowledge_patch(
-                        ctx.requirement,
-                        features,
-                        coverage,
-                        current_graph,
-                        request_timeout=ctx.topology_llm_timeout_seconds,
-                    ),
-                    ctx.topology_llm_timeout_seconds,
-                )
-            except TimeoutError:
-                patch = None
-                timeout_label = self._timeout_label(ctx.topology_llm_timeout_seconds)
-                repair_trace.append(
-                    {
-                        "round": round_index,
-                        "action": "llm_patch_timeout",
-                        "message": f"DeepSeek ReAct 补全超过 {timeout_label}，已跳过以保证响应速度。",
-                    }
-                )
-                break
-            ctx.trace.append(f"拓扑耗时：第 {round_index} 轮 DeepSeek ReAct 补全 {time.perf_counter() - patch_started:.1f}s")
-            if not patch:
-                repair_trace.append(
-                    {
-                        "round": round_index,
-                        "action": "llm_patch_unavailable",
-                        "message": "DeepSeek 补全不可用或返回格式不合法，本次不写入 Neo4j。",
-                    }
-                )
-                break
-            raw_patch = patch
-            trial_patch = raw_patch
-            normalization_report: list[dict[str, Any]] = []
-            patch_capability_names = {
-                str(item.get("name", "")).strip()
-                for item in trial_patch.get("capabilities", [])
-                if isinstance(item, dict)
-            }
-            patch_names = set(trial_patch.get("components", [])) | set(trial_patch.get("stores", []))
-            patch_relations = {
-                f"{edge.get('source')}->{edge.get('target')}"
-                for edge in trial_patch.get("edges", [])
-                if isinstance(edge, dict) and edge.get("source") and edge.get("target")
-            }
-            if not (
-                patch_capability_names & set(coverage.get("missing_capabilities", []))
-                or patch_names & set(coverage.get("missing_components", []))
-                or patch_names & set(coverage.get("missing_quality_infrastructure", []))
-                or patch_relations & set(coverage.get("missing_relations", []))
-            ):
-                repair_trace.append(
-                    {
-                        "round": round_index,
-                        "action": "llm_patch_rejected",
-                        "message": "DeepSeek 补丁未覆盖缺失能力、组件或关系，已拒绝泛化补全。",
-                        "missing_capabilities": coverage.get("missing_capabilities", []),
-                        "missing_components": coverage.get("missing_components", []),
-                        "missing_relations": coverage.get("missing_relations", []),
-                        "raw_patch": raw_patch,
-                        "trial_patch": trial_patch,
-                        "write_patch": trial_patch,
-                        "normalization": normalization_report,
-                    }
-                )
-                break
-
-            missing_capabilities = [item for item in coverage.get("missing_capabilities", []) if item]
-            if missing_capabilities:
-                covered_caps = {
-                    item
-                    for item in patch_capability_names
-                    if item in missing_capabilities
-                }
-                if len(covered_caps) < len(set(missing_capabilities)):
-                    repair_trace.append(
-                        {
-                            "round": round_index,
-                            "action": "llm_patch_rejected",
-                            "message": "DeepSeek 补丁没有把缺失能力按能力组逐项补齐，已拒绝。",
-                            "missing_capabilities": missing_capabilities,
-                            "trial_patch": trial_patch,
-                            "write_patch": trial_patch,
-                            "normalization": normalization_report,
-                        }
-                    )
-                    break
-
-            trial_graph = self.topology_generator.merge_knowledge_patch(current_graph, trial_patch)
-            refreshed_coverage = self.topology_generator.assess_coverage(
-                ctx.requirement,
-                features,
-                trial_graph,
-                extra_capabilities=llm_capabilities,
-            )
-            if refreshed_coverage["score"] <= coverage["score"]:
-                repair_trace.append(
-                    {
-                        "round": round_index,
-                        "action": "llm_patch_rejected",
-                        "message": "DeepSeek 补丁试合并后未提升多维覆盖率，未写入 Neo4j。",
-                        "coverage_after": refreshed_coverage,
-                        "raw_patch": raw_patch,
-                        "trial_patch": trial_patch,
-                        "write_patch": trial_patch,
-                        "normalization": normalization_report,
-                    }
-                )
-                break
-
-            current_graph = trial_graph
-            if ctx.topology_fast_mode:
-                neo4j_result = {
-                    "ok": False,
-                    "skipped": True,
-                    "reason": "拓扑快速模式：补丁已临时用于本次架构图，跳过 embedding 规范化和 Neo4j 写入。",
-                }
-            elif self._patch_has_write_items(trial_patch):
-                self._schedule_background_topology_write(
-                    ctx,
-                    features,
-                    trial_patch,
-                    current_graph,
-                    coverage,
-                    f"第 {round_index} 轮 ReAct 补丁",
-                )
-                neo4j_result = {
-                    "ok": False,
-                    "pending": True,
-                    "reason": "知识库进化已转入后台：embedding 规范化通过后再写入 Neo4j。",
-                }
-            else:
-                neo4j_result = {
-                    "ok": False,
-                    "skipped": True,
-                    "reason": "补丁没有达到永久写入条件的节点或关系。",
-                }
-            repair_trace.append(
-                {
-                    "round": round_index,
-                    "action": "llm_patch_merged",
-                    "raw_patch": raw_patch,
-                    "trial_patch": trial_patch,
-                    "write_patch": trial_patch if not ctx.topology_fast_mode else {},
-                    "normalization": normalization_report,
-                    "temporary_items": [],
-                    "semantic_available": None,
-                    "neo4j": neo4j_result,
-                    "coverage_after": refreshed_coverage,
-                }
-            )
-            merged_names = [
-                f"{item['original']}->{item['canonical']}"
-                for item in normalization_report
-                if item.get("action") == "merged"
-            ]
-            if merged_names:
-                ctx.trace.append("拓扑知识规范化：同类型近义节点合并 " + "、".join(merged_names[:6]))
-            ctx.trace.append(
-                "拓扑 ReAct 补全：覆盖率 "
-                f"{coverage['score']} -> {refreshed_coverage['score']}，"
-                f"补充组件 {', '.join(trial_patch.get('components', [])[:6]) or '见能力映射'}"
-            )
-            if refreshed_coverage["score"] >= self.TOPOLOGY_COVERAGE_THRESHOLD:
-                break
-
-        return current_graph, repair_trace
-
-    def _schedule_background_topology_write(
-        self,
-        ctx: ReasoningContext,
-        features: ExtractedFeatures,
-        write_candidate_patch: dict[str, Any],
-        graph_knowledge: dict[str, Any],
-        coverage: dict[str, Any],
-        label: str,
-    ) -> None:
-        if ctx.topology_fast_mode or not self._patch_has_write_items(write_candidate_patch):
-            return
-
-        ctx.trace.append(f"知识库进化后台任务已启动：{label} 将执行 embedding 规范化和 Neo4j 写入")
-        task = asyncio.create_task(
-            self._background_normalize_and_merge_topology_patch(
-                requirement=ctx.requirement,
-                features=features,
-                patch=write_candidate_patch,
-                graph_knowledge=graph_knowledge,
-                coverage=coverage,
-                label=label,
-            )
-        )
-        task.add_done_callback(self._consume_background_task_result)
-
-    async def _background_normalize_and_merge_topology_patch(
-        self,
-        requirement: str,
-        features: ExtractedFeatures,
-        patch: dict[str, Any],
-        graph_knowledge: dict[str, Any],
-        coverage: dict[str, Any],
-        label: str,
-    ) -> None:
-        started = time.perf_counter()
-        normalization = await self.graph_service.normalize_topology_patch(
-            patch,
-            requirement,
-            features,
-            graph_knowledge,
-            coverage,
-        )
-        write_patch = normalization.get("write_patch", normalization.get("trial_patch", patch))
-        if self._patch_has_write_items(write_patch):
-            await asyncio.to_thread(
-                self.graph_service.merge_topology_patch,
-                requirement,
-                features,
-                write_patch,
-            )
-        elapsed = time.perf_counter() - started
-        print(f"[topology-background] {label} normalized and merged in {elapsed:.1f}s")
-
-    @staticmethod
-    def _consume_background_task_result(task: asyncio.Task) -> None:
-        try:
-            task.result()
+            return await self._build_style_topologies(ctx, features, winner, style_schema)
         except Exception as exc:
-            print(f"[topology-background] knowledge evolution failed: {exc}")
+            ctx.trace.append(f"拓扑生成失败：{exc}")
+            return {"diagrams": {}, "graphs": {}}
+
+    async def _build_style_topologies(
+        self,
+        ctx: ReasoningContext,
+        features: ExtractedFeatures,
+        winner: CandidateEvaluation,
+        schema,
+    ) -> dict[str, Any]:
+        """LLM → StyleInstance → StyleRenderer → Mermaid."""
+        ctx.trace.append(f"风格驱动拓扑：使用「{schema.style_name}」Schema 引导 LLM 输出结构化组件和连接")
+
+        instance = await self.llm_client.extract_style_instance(
+            ctx.requirement, features, schema,
+            composition_mode=ctx.composition_recommendation.get("composition_needed", False),
+        )
+        if not instance:
+            raise RuntimeError("LLM 未返回有效的 StyleInstance")
+
+        ctx.trace.append(f"LLM 填充 StyleInstance 完成：{len(instance.components)} 组件，{len(instance.connections)} 连接")
+
+        diagrams, graphs, render_notes = self.style_renderer.render_views(schema, instance, notes=[])
+        ctx.trace.extend(render_notes)
+
+        ctx.decision_trace["topology_evidence"] = {
+            "method": "style_schema",
+            "style_id": schema.style_id,
+            "style_name": schema.style_name,
+            "component_count": len(instance.components),
+            "connection_count": len(instance.connections),
+            "notes": render_notes,
+        }
+
+        return {
+            "diagrams": {f"{winner.name}{name}": diagram for name, diagram in diagrams.items()},
+            "graphs": {f"{winner.name}{name}": graph for name, graph in graphs.items()},
+        }
 
     async def _analyze(self, ctx: ReasoningContext):
         ctx.trace.append("需求解析 Agent 接收自然语言需求")
-        features = await self.llm_client.extract_features(ctx.requirement)
-        if not features:
-            message = self.llm_client.last_error or "DeepSeek 未配置、调用失败或返回 JSON 不符合结构化需求 Schema。"
-            ctx.trace.append(f"需求解析 Agent 终止：{message}")
-            raise RequirementParsingError(f"需求解析失败：{message}")
-        features = self._normalize_llm_features(ctx.requirement, features)
-        ctx.trace.append("DeepSeek 主解析完成结构化需求特征，并通过 Pydantic Schema 校验")
+        try:
+            features = await self.requirement_parser.parse(ctx.requirement)
+        except ValueError as exc:
+            ctx.trace.append(f"需求解析 Agent 输入校验失败：{exc}")
+            raise RequirementParsingError(str(exc)) from exc
 
-        ctx.trace.append("本地规则引擎已停用：需求理解结果完全来自 DeepSeek，Python 仅做 Schema 校验")
-        ctx.trace.append("知识图谱不参与候选架构打分，仅用于后续拓扑知识检索、ReAct 补全和 Neo4j 写入")
+        consistency_issues = [
+            note for note in features.ambiguity_notes
+            if "一致性" in note or "矛盾" in note or "不匹配" in note or "复核" in note
+        ]
+        if consistency_issues:
+            ctx.trace.append(
+                f"需求解析 Agent 一致性校验发现 {len(consistency_issues)} 个问题："
+                + "；".join(consistency_issues[:3])
+            )
+        ctx.trace.append("需求解析 Agent 完成结构化特征提取与校验")
+        ctx.trace.append("知识图谱用于后续拓扑知识检索、ReAct 补全和 Neo4j 写入")
         return features, []
 
     async def _match_with_deepseek(
@@ -707,7 +325,18 @@ class HybridReasoningOrchestrator:
             raise DeepSeekServiceError(f"架构匹配失败：{message}")
         candidates, composition_payload = result
         review_notes = list(composition_payload.pop("review_notes", []))
-        ctx.trace.append("DeepSeek 架构匹配 Agent 完成候选架构排序")
+
+        # ── Agent 后置校验：架构匹配 Agent 对比本地评分，检测过度设计 ──
+        candidates, consistency_notes = self.matcher.validate_llm_results(
+            features, candidates, ctx.styles
+        )
+        if consistency_notes:
+            ctx.trace.append(
+                f"架构匹配 Agent 一致性校验发现 {len(consistency_notes)} 个关注点"
+            )
+            ctx.trace.extend(consistency_notes)
+
+        ctx.trace.append("DeepSeek 架构匹配 + Agent 校验完成候选架构排序")
         if review_notes:
             ctx.trace.extend(f"DeepSeek 架构匹配说明：{note}" for note in review_notes)
         return candidates[:top_k], composition_payload, review_notes
@@ -743,61 +372,40 @@ class HybridReasoningOrchestrator:
                 normalized[key] = [str(value).strip()]
             else:
                 normalized[key] = []
+        component_specs = []
+        for item in expectations.get("component_specs", []):
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "")).strip()
+            if not name:
+                continue
+            component_specs.append(
+                {
+                    "name": name,
+                    "type": str(item.get("type", "service")).strip() or "service",
+                    "layer": str(item.get("layer", "business")).strip() or "business",
+                    "owned_by": str(item.get("owned_by", "")).strip(),
+                }
+            )
+        relation_specs = []
+        for item in expectations.get("relation_specs", []):
+            if not isinstance(item, dict):
+                continue
+            source = str(item.get("source", "")).strip()
+            target = str(item.get("target", "")).strip()
+            if not source or not target:
+                continue
+            relation_specs.append(
+                {
+                    "source": source,
+                    "target": target,
+                    "label": str(item.get("label", "依赖")).strip() or "依赖",
+                    "kind": str(item.get("kind", "sync")).strip() or "sync",
+                }
+            )
+        normalized["component_specs"] = component_specs
+        normalized["relation_specs"] = relation_specs
         return normalized
-
-    @staticmethod
-    def _drivers_from_features(features: ExtractedFeatures) -> list[str]:
-        mapping = {
-            "concurrency": "高并发",
-            "realtime": "实时性",
-            "reliability": "高可用",
-            "scalability": "弹性伸缩",
-            "data_intensity": "数据密集",
-            "ai_reasoning": "AI 推理",
-        }
-        drivers = [label for key, label in mapping.items() if features.quality_attributes.get(key, 0) >= 0.65]
-        if features.data_flow == "event_stream":
-            drivers.append("事件流")
-        if features.data_flow == "pipeline":
-            drivers.append("数据管道")
-        if features.data_flow == "transactional":
-            drivers.append("事务处理")
-        return drivers
-
-    @staticmethod
-    def _coverage_missing_items(coverage: dict[str, Any]) -> list[str]:
-        missing: list[str] = []
-        for key in [
-            "missing_capabilities",
-            "missing_components",
-            "missing_relations",
-            "missing_quality_infrastructure",
-        ]:
-            missing.extend(coverage.get(key, []))
-        return missing
-
-    @classmethod
-    def _coverage_requires_repair(cls, coverage: dict[str, Any]) -> bool:
-        business_missing = bool(
-            coverage.get("missing_capabilities")
-            or coverage.get("missing_components")
-            or coverage.get("missing_relations")
-        )
-        quality_missing = bool(coverage.get("missing_quality_infrastructure"))
-        if business_missing:
-            return True
-        if quality_missing and coverage.get("score", 0) < cls.TOPOLOGY_COVERAGE_THRESHOLD:
-            return True
-        return False
-
-    @staticmethod
-    def _patch_has_write_items(patch: dict[str, Any]) -> bool:
-        return bool(
-            patch.get("capabilities")
-            or patch.get("components")
-            or patch.get("stores")
-            or patch.get("edges")
-        )
 
     @staticmethod
     def _dedupe(items: list[Any]) -> list[Any]:
@@ -811,56 +419,15 @@ class HybridReasoningOrchestrator:
         top_k: int,
         topology_options: dict | None = None,
     ) -> ReasoningContext:
-        topology_options = topology_options or {}
-        fast_mode = topology_options.get("fast_mode")
-        timeout = topology_options.get("llm_timeout_seconds")
-        rounds = topology_options.get("repair_max_rounds")
-        normalized_timeout = cls._normalize_topology_timeout(timeout)
         return ReasoningContext(
             requirement=requirement,
             top_k=top_k,
             styles=styles,
             style_map={style.id: style for style in styles},
-            trace=[
-                "HybridReasoningOrchestrator 启动 LangChain 风格链式编排",
-                "拓扑生成配置："
-                f"{'快速模式' if (cls.TOPOLOGY_FAST_MODE if fast_mode is None else bool(fast_mode)) else '精细模式'}，"
-                f"LLM 超时 {cls._timeout_label(normalized_timeout)}，"
-                f"补全轮数 {int(rounds if rounds is not None else cls.TOPOLOGY_REPAIR_MAX_ROUNDS)}",
-            ],
+            trace=["HybridReasoningOrchestrator 启动链式编排"],
             decision_trace={},
             composition_recommendation={},
-            topology_fast_mode=cls.TOPOLOGY_FAST_MODE if fast_mode is None else bool(fast_mode),
-            topology_llm_timeout_seconds=normalized_timeout,
-            topology_repair_max_rounds=max(
-                0,
-                min(3, int(rounds if rounds is not None else cls.TOPOLOGY_REPAIR_MAX_ROUNDS)),
-            ),
         )
-
-    @classmethod
-    def _normalize_topology_timeout(cls, timeout: Any) -> float | None:
-        if timeout is None:
-            return max(3.0, float(cls.TOPOLOGY_LLM_TIMEOUT_SECONDS))
-        try:
-            value = float(timeout)
-        except (TypeError, ValueError):
-            return max(3.0, float(cls.TOPOLOGY_LLM_TIMEOUT_SECONDS))
-        if value <= 0:
-            return None
-        return max(3.0, value)
-
-    @staticmethod
-    async def _maybe_wait_for(awaitable, timeout: float | None):
-        if timeout is None:
-            return await awaitable
-        return await asyncio.wait_for(awaitable, timeout=timeout)
-
-    @staticmethod
-    def _timeout_label(timeout: float | None) -> str:
-        if timeout is None:
-            return "无上限"
-        return f"{timeout:.0f}s"
 
     @staticmethod
     def _build_decision_trace(

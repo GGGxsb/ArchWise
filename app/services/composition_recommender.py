@@ -153,13 +153,6 @@ class CompositionRecommender:
                 ["核心业务服务", "扩展服务", "第三方集成"],
                 "高扩展诉求需要独立部署和模块化治理能力。",
             )
-        if any(keyword in text for keyword in ["突发", "峰值", "低运维", "图片生成", "任务"]):
-            add(
-                "serverless",
-                "弹性任务处理",
-                ["异步任务", "图片生成", "通知推送", "自动化处理"],
-                "突发任务和轻运维场景可局部采用 Serverless 降低资源管理成本。",
-            )
 
         deduped: dict[str, dict[str, Any]] = {}
         for item in supporting:

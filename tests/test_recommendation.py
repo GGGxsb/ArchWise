@@ -124,11 +124,6 @@ def test_knowledge_graph_has_nodes_and_edges():
     assert payload["edges"]
 
 
-def test_neo4j_status_endpoint_is_available():
-    response = client.get("/api/knowledge/neo4j/status")
-    assert response.status_code == 200
-    payload = response.json()
-    assert "configured" in payload
 
 
 def test_service_generates_matrix_and_trace(monkeypatch):

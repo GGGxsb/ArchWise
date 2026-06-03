@@ -19,7 +19,6 @@ load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent
 repository = KnowledgeRepository()
 service = RecommendationService(repository)
-graph_service = KnowledgeGraphService()
 
 app = FastAPI(
     title="ArchWise 软件体系结构风格智能助手",
@@ -105,27 +104,7 @@ async def styles():
 
 @app.get("/api/knowledge/graph")
 async def graph():
-    return graph_service.build_graph(repository.list_styles())
-
-
-@app.get("/api/knowledge/neo4j/status")
-async def neo4j_status():
-    return graph_service.neo4j_status()
-
-
-@app.post("/api/knowledge/neo4j/sync")
-async def sync_neo4j():
-    return graph_service.sync_to_neo4j(repository.list_styles())
-
-
-@app.post("/api/knowledge/neo4j/rebuild-topology")
-async def rebuild_neo4j_topology():
-    return graph_service.rebuild_domain_topology()
-
-
-@app.get("/api/knowledge/neo4j/duplicates")
-async def neo4j_duplicate_like_nodes():
-    return await graph_service.detect_duplicate_like_nodes()
+    return KnowledgeGraphService.build_graph(repository.list_styles())
 
 
 @app.post("/api/knowledge/styles")
