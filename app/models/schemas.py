@@ -9,7 +9,7 @@ class RequirementRequest(BaseModel):
     requirement: str = Field(..., min_length=5, description="用户自然语言需求")
     top_k: int = Field(default=12, ge=3, le=12, description="候选架构数量")
     topology_fast_mode: bool | None = Field(default=None, description="是否启用本次拓扑快速模式")
-    topology_llm_timeout_seconds: float | None = Field(default=None, ge=3, le=60, description="本次拓扑 LLM 调用超时时间")
+    topology_llm_timeout_seconds: float | None = Field(default=None, description="本次拓扑 LLM 调用超时时间；0 表示无上限")
     topology_repair_max_rounds: int | None = Field(default=None, ge=0, le=3, description="本次拓扑 ReAct 补全轮数")
 
 
@@ -20,7 +20,7 @@ class TopologyRequest(BaseModel):
     composition_recommendation: dict[str, Any] = Field(default_factory=dict)
     decision_trace: dict[str, Any] = Field(default_factory=dict)
     topology_fast_mode: bool | None = Field(default=None, description="是否启用本次拓扑快速模式")
-    topology_llm_timeout_seconds: float | None = Field(default=None, ge=3, le=60, description="本次拓扑 LLM 调用超时时间")
+    topology_llm_timeout_seconds: float | None = Field(default=None, description="本次拓扑 LLM 调用超时时间；0 表示无上限")
     topology_repair_max_rounds: int | None = Field(default=None, ge=0, le=3, description="本次拓扑 ReAct 补全轮数")
 
 

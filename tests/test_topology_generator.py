@@ -194,13 +194,13 @@ def test_graph_primary_topology_uses_local_rules_only_as_topology_validator():
     assert "媒体服务" in mermaid
     assert "事件总线" in mermaid
     assert "API网关" in mermaid
-    assert "拓扑生成策略：Neo4j 图谱作为主知识源" in " ".join(notes)
+    assert "拓扑生成策略：Neo4j coverage 达标" in " ".join(notes)
     assert "评论服务" not in mermaid
     assert "Feed服务" not in mermaid
     assert "课程服务" not in mermaid
 
 
-def test_topology_keeps_composition_styles_out_of_system_diagram():
+def test_topology_builds_diagram_from_composition_architectures():
     requirement = "开发一个跨平台的即时通讯系统，要求支持万人同时在线，需要保证消息的实时性和可靠性，后期可能需要快速扩展视频通话功能"
     features = features_for(
         "即时通信",
@@ -250,13 +250,15 @@ def test_topology_keeps_composition_styles_out_of_system_diagram():
     )
 
     assert "架构模式职责" not in mermaid
-    assert "微服务架构" not in mermaid
-    assert "CQRS 架构" not in mermaid
-    assert "style_primary" not in mermaid
-    assert "style_support" not in mermaid
+    assert "事件驱动架构：事件流" in mermaid
+    assert "微服务架构：服务拆分" in mermaid
+    assert "CQRS 架构：读写分离" in mermaid
+    assert "查询服务" in mermaid
+    assert "投影器" in mermaid
+    assert "读模型" in mermaid
     assert "消息服务" in mermaid
     assert "事件总线" in mermaid
-    assert "拓扑生成约束" in " ".join(notes)
+    assert "组合架构建图" in " ".join(notes)
 
 
 def test_topology_does_not_add_composition_layer_when_not_needed():
@@ -376,5 +378,76 @@ def test_ecommerce_graph_topology_repairs_partial_neo4j_result():
     assert "购物车缓存" in mermaid
     assert "库存库" in mermaid
     assert "物流库" in mermaid
-    assert "拓扑生成策略：Neo4j 图谱作为主知识源" in " ".join(notes)
+    assert "拓扑生成策略：Neo4j coverage 不足，仅作为增强" in " ".join(notes)
     assert "拓扑自检：电商核心能力覆盖率" in " ".join(notes)
+
+
+def test_low_coverage_neo4j_does_not_override_llm_topology_expectations():
+    requirement = (
+        "农资进销存 + 农户赊销管理系统。供货商批量录入化肥、种子进货单据，系统自动入库更新库存，采购产生应付账款；"
+        "农户到店采购，可现款现货或赊账下单，赊销单据自动挂应收账目，约定还款日；"
+        "财务录入回款冲抵欠款，逾期欠款系统自动生成罚息台账；库存低于安全阈值自动生成采购申请单；"
+        "月末汇总采购成本、零售营收、赊销坏账、门店利润报表。"
+    )
+    features = features_for(
+        "农资进销存",
+        ["农资", "进货", "库存", "赊销", "回款", "罚息", "补货", "利润报表"],
+        ["进货单据管理", "库存入库更新", "采购应付账款", "现款销售", "赊销下单", "应收账款管理", "分期回款核销", "逾期罚息台账", "采购申请审核", "利润报表统计"],
+        {"reliability": 0.72, "data_intensity": 0.65},
+        "transactional",
+        {
+            "must_have_components": [
+                "进货单据服务",
+                "库存服务",
+                "应付账款服务",
+                "销售下单服务",
+                "赊销单据服务",
+                "应收账款服务",
+                "回款核销服务",
+                "罚息台账服务",
+                "采购申请服务",
+                "利润报表服务",
+                "进货单据库",
+                "库存库",
+                "应付账款库",
+                "应收账款库",
+                "回款记录库",
+                "罚息台账库",
+                "报表库",
+            ],
+            "must_have_relations": [
+                "进货单据服务->库存服务",
+                "进货单据服务->应付账款服务",
+                "销售下单服务->赊销单据服务",
+                "赊销单据服务->应收账款服务",
+                "回款核销服务->应收账款服务",
+                "罚息台账服务->罚息台账库",
+                "利润报表服务->报表库",
+            ],
+            "quality_infrastructure": ["监控服务", "审计服务"],
+        },
+    )
+    graph_knowledge = {
+        "components": ["数据管道", "监控服务", "审计服务"],
+        "stores": ["数据仓库"],
+        "edges": [{"source": "数据管道", "target": "数据仓库", "label": "汇总", "kind": "sync"}],
+        "scenarios": ["通用数据分析"],
+        "capabilities": ["数据处理"],
+    }
+
+    mermaid, notes = TopologyGenerator().generate(
+        requirement,
+        features,
+        candidate("layered", "分层架构"),
+        graph_knowledge=graph_knowledge,
+    )
+
+    assert "拓扑生成策略：Neo4j coverage 不足，仅作为增强" in " ".join(notes)
+    assert "进货单据服务" in mermaid
+    assert "库存服务" in mermaid
+    assert "应收账款服务" in mermaid
+    assert "回款核销服务" in mermaid
+    assert "罚息台账服务" in mermaid
+    assert "利润报表服务" in mermaid
+    assert "数据仓库" not in mermaid
+    assert "数据管道" not in mermaid

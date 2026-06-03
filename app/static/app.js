@@ -112,9 +112,10 @@ async function recommend() {
 
 function readTopologyOptions() {
   const fastMode = (topologyModeEl?.value || "fast") === "fast";
+  const timeoutValue = topologyTimeoutEl?.value ?? "12";
   return {
     topology_fast_mode: fastMode,
-    topology_llm_timeout_seconds: Number(topologyTimeoutEl?.value || 12),
+    topology_llm_timeout_seconds: Number(timeoutValue),
     topology_repair_max_rounds: Number(topologyRoundsEl?.value || 1),
   };
 }
@@ -1145,7 +1146,7 @@ function escapeHtml(value) {
 }
 
 function notifyRepairServiceStatus(item) {
-  if (!item.semantic_available) {
+  if (item.semantic_available === false) {
     showServiceToast(
       `embedding:${item.round || ""}`,
       "Embedding 语义召回不可用",
@@ -1153,7 +1154,15 @@ function notifyRepairServiceStatus(item) {
     );
   }
   const neo4j = item.neo4j || {};
-  if (neo4j.ok === false && !neo4j.skipped) {
+  if (neo4j.pending) {
+    showServiceToast(
+      `neo4j-pending:${item.round || ""}:${neo4j.reason || ""}`,
+      "知识库进化后台执行",
+      neo4j.reason || "Embedding 规范化和 Neo4j 写入已转入后台，不阻塞本次架构图生成。",
+      "info"
+    );
+  }
+  if (neo4j.ok === false && !neo4j.skipped && !neo4j.pending) {
     showServiceToast(
       `neo4j-error:${item.round || ""}:${neo4j.error || neo4j.reason || ""}`,
       "Neo4j 写入失败",

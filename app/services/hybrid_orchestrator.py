@@ -30,7 +30,7 @@ class ReasoningContext:
     decision_trace: dict[str, Any]
     composition_recommendation: dict[str, Any]
     topology_fast_mode: bool
-    topology_llm_timeout_seconds: float
+    topology_llm_timeout_seconds: float | None
     topology_repair_max_rounds: int
 
 
@@ -332,7 +332,7 @@ class HybridReasoningOrchestrator:
             graph_knowledge,
             topology_capabilities,
         )
-        ctx.trace.append(f"拓扑耗时：LLM 补全与语义规范化 {time.perf_counter() - repair_started:.1f}s")
+        ctx.trace.append(f"拓扑耗时：LLM 补全与临时合并 {time.perf_counter() - repair_started:.1f}s")
         ctx.trace.append(f"拓扑耗时：知识准备总计 {time.perf_counter() - started:.1f}s")
         return graph_knowledge, repair_trace, topology_capabilities
 
@@ -348,17 +348,23 @@ class HybridReasoningOrchestrator:
 
         gap_started = time.perf_counter()
         try:
-            gap_patch = await asyncio.wait_for(
-                self.llm_client.review_topology_coverage_gap(ctx.requirement, features, current_graph),
-                timeout=ctx.topology_llm_timeout_seconds,
+            gap_patch = await self._maybe_wait_for(
+                self.llm_client.review_topology_coverage_gap(
+                    ctx.requirement,
+                    features,
+                    current_graph,
+                    request_timeout=ctx.topology_llm_timeout_seconds,
+                ),
+                ctx.topology_llm_timeout_seconds,
             )
         except TimeoutError:
             gap_patch = None
+            timeout_label = self._timeout_label(ctx.topology_llm_timeout_seconds)
             repair_trace.append(
                 {
                     "round": 0,
                     "action": "llm_gap_review_timeout",
-                    "message": f"拓扑完整性复核超过 {ctx.topology_llm_timeout_seconds:.0f}s，已跳过以保证响应速度。",
+                    "message": f"拓扑完整性复核超过 {timeout_label}，已跳过以保证响应速度。",
                 }
             )
         ctx.trace.append(f"拓扑耗时：DeepSeek 漏项复核 {time.perf_counter() - gap_started:.1f}s")
@@ -369,17 +375,7 @@ class HybridReasoningOrchestrator:
                 current_graph,
                 extra_capabilities=llm_capabilities,
             )
-            normalize_started = time.perf_counter()
-            normalization = await self.graph_service.normalize_topology_patch(
-                gap_patch,
-                ctx.requirement,
-                features,
-                current_graph,
-                before_coverage,
-            )
-            ctx.trace.append(f"拓扑耗时：漏项补丁 embedding 规范化 {time.perf_counter() - normalize_started:.1f}s")
-            trial_patch = normalization.get("trial_patch", gap_patch)
-            write_patch = normalization.get("write_patch", trial_patch)
+            trial_patch = gap_patch
             current_graph = self.topology_generator.merge_knowledge_patch(current_graph, trial_patch)
             after_coverage = self.topology_generator.assess_coverage(
                 ctx.requirement,
@@ -391,20 +387,27 @@ class HybridReasoningOrchestrator:
                 neo4j_result = {
                     "ok": False,
                     "skipped": True,
-                    "reason": "拓扑快速模式：补丁已用于本次架构图，跳过同步写入 Neo4j。",
+                    "reason": "拓扑快速模式：补丁已临时用于本次架构图，跳过 embedding 规范化和 Neo4j 写入。",
                 }
-            elif self._patch_has_write_items(write_patch):
-                neo4j_result = await asyncio.to_thread(
-                    self.graph_service.merge_topology_patch,
-                    ctx.requirement,
+            elif self._patch_has_write_items(trial_patch):
+                self._schedule_background_topology_write(
+                    ctx,
                     features,
-                    write_patch,
+                    trial_patch,
+                    graph_knowledge,
+                    before_coverage,
+                    "漏项复核补丁",
                 )
+                neo4j_result = {
+                    "ok": False,
+                    "pending": True,
+                    "reason": "知识库进化已转入后台：embedding 规范化通过后再写入 Neo4j。",
+                }
             else:
                 neo4j_result = {
                     "ok": False,
                     "skipped": True,
-                    "reason": "语义规范化后没有达到永久写入条件的节点或关系。",
+                    "reason": "补丁没有达到永久写入条件的节点或关系。",
                 }
             repair_trace.append(
                 {
@@ -412,10 +415,10 @@ class HybridReasoningOrchestrator:
                     "action": "llm_gap_review_merged",
                     "raw_patch": gap_patch,
                     "trial_patch": trial_patch,
-                    "write_patch": write_patch,
-                    "normalization": normalization.get("report", []),
-                    "temporary_items": normalization.get("temporary_items", []),
-                    "semantic_available": normalization.get("semantic_available", False),
+                    "write_patch": trial_patch if not ctx.topology_fast_mode else {},
+                    "normalization": [],
+                    "temporary_items": [],
+                    "semantic_available": None,
                     "neo4j": neo4j_result,
                     "coverage_before": before_coverage,
                     "coverage_after": after_coverage,
@@ -447,22 +450,24 @@ class HybridReasoningOrchestrator:
 
             patch_started = time.perf_counter()
             try:
-                patch = await asyncio.wait_for(
+                patch = await self._maybe_wait_for(
                     self.llm_client.propose_topology_knowledge_patch(
                         ctx.requirement,
                         features,
                         coverage,
                         current_graph,
+                        request_timeout=ctx.topology_llm_timeout_seconds,
                     ),
-                    timeout=ctx.topology_llm_timeout_seconds,
+                    ctx.topology_llm_timeout_seconds,
                 )
             except TimeoutError:
                 patch = None
+                timeout_label = self._timeout_label(ctx.topology_llm_timeout_seconds)
                 repair_trace.append(
                     {
                         "round": round_index,
                         "action": "llm_patch_timeout",
-                        "message": f"DeepSeek ReAct 补全超过 {ctx.topology_llm_timeout_seconds:.0f}s，已跳过以保证响应速度。",
+                        "message": f"DeepSeek ReAct 补全超过 {timeout_label}，已跳过以保证响应速度。",
                     }
                 )
                 break
@@ -477,18 +482,8 @@ class HybridReasoningOrchestrator:
                 )
                 break
             raw_patch = patch
-            normalize_started = time.perf_counter()
-            normalization = await self.graph_service.normalize_topology_patch(
-                raw_patch,
-                ctx.requirement,
-                features,
-                current_graph,
-                coverage,
-            )
-            ctx.trace.append(f"拓扑耗时：第 {round_index} 轮 embedding 规范化 {time.perf_counter() - normalize_started:.1f}s")
-            trial_patch = normalization.get("trial_patch", raw_patch)
-            write_patch = normalization.get("write_patch", trial_patch)
-            normalization_report = normalization.get("report", [])
+            trial_patch = raw_patch
+            normalization_report: list[dict[str, Any]] = []
             patch_capability_names = {
                 str(item.get("name", "")).strip()
                 for item in trial_patch.get("capabilities", [])
@@ -516,7 +511,7 @@ class HybridReasoningOrchestrator:
                         "missing_relations": coverage.get("missing_relations", []),
                         "raw_patch": raw_patch,
                         "trial_patch": trial_patch,
-                        "write_patch": write_patch,
+                        "write_patch": trial_patch,
                         "normalization": normalization_report,
                     }
                 )
@@ -537,7 +532,7 @@ class HybridReasoningOrchestrator:
                             "message": "DeepSeek 补丁没有把缺失能力按能力组逐项补齐，已拒绝。",
                             "missing_capabilities": missing_capabilities,
                             "trial_patch": trial_patch,
-                            "write_patch": write_patch,
+                            "write_patch": trial_patch,
                             "normalization": normalization_report,
                         }
                     )
@@ -559,7 +554,7 @@ class HybridReasoningOrchestrator:
                         "coverage_after": refreshed_coverage,
                         "raw_patch": raw_patch,
                         "trial_patch": trial_patch,
-                        "write_patch": write_patch,
+                        "write_patch": trial_patch,
                         "normalization": normalization_report,
                     }
                 )
@@ -570,20 +565,27 @@ class HybridReasoningOrchestrator:
                 neo4j_result = {
                     "ok": False,
                     "skipped": True,
-                    "reason": "拓扑快速模式：补丁已用于本次架构图，跳过同步写入 Neo4j。",
+                    "reason": "拓扑快速模式：补丁已临时用于本次架构图，跳过 embedding 规范化和 Neo4j 写入。",
                 }
-            elif self._patch_has_write_items(write_patch):
-                neo4j_result = await asyncio.to_thread(
-                    self.graph_service.merge_topology_patch,
-                    ctx.requirement,
+            elif self._patch_has_write_items(trial_patch):
+                self._schedule_background_topology_write(
+                    ctx,
                     features,
-                    write_patch,
+                    trial_patch,
+                    current_graph,
+                    coverage,
+                    f"第 {round_index} 轮 ReAct 补丁",
                 )
+                neo4j_result = {
+                    "ok": False,
+                    "pending": True,
+                    "reason": "知识库进化已转入后台：embedding 规范化通过后再写入 Neo4j。",
+                }
             else:
                 neo4j_result = {
                     "ok": False,
                     "skipped": True,
-                    "reason": "语义规范化后没有达到永久写入条件的节点或关系。",
+                    "reason": "补丁没有达到永久写入条件的节点或关系。",
                 }
             repair_trace.append(
                 {
@@ -591,10 +593,10 @@ class HybridReasoningOrchestrator:
                     "action": "llm_patch_merged",
                     "raw_patch": raw_patch,
                     "trial_patch": trial_patch,
-                    "write_patch": write_patch,
+                    "write_patch": trial_patch if not ctx.topology_fast_mode else {},
                     "normalization": normalization_report,
-                    "temporary_items": normalization.get("temporary_items", []),
-                    "semantic_available": normalization.get("semantic_available", False),
+                    "temporary_items": [],
+                    "semantic_available": None,
                     "neo4j": neo4j_result,
                     "coverage_after": refreshed_coverage,
                 }
@@ -611,13 +613,70 @@ class HybridReasoningOrchestrator:
                 f"{coverage['score']} -> {refreshed_coverage['score']}，"
                 f"补充组件 {', '.join(trial_patch.get('components', [])[:6]) or '见能力映射'}"
             )
-            temporary_items = normalization.get("temporary_items", [])
-            if temporary_items:
-                ctx.trace.append(f"语义规范化：{len(temporary_items)} 个不确定节点仅用于本次拓扑，未写入 Neo4j")
             if refreshed_coverage["score"] >= self.TOPOLOGY_COVERAGE_THRESHOLD:
                 break
 
         return current_graph, repair_trace
+
+    def _schedule_background_topology_write(
+        self,
+        ctx: ReasoningContext,
+        features: ExtractedFeatures,
+        write_candidate_patch: dict[str, Any],
+        graph_knowledge: dict[str, Any],
+        coverage: dict[str, Any],
+        label: str,
+    ) -> None:
+        if ctx.topology_fast_mode or not self._patch_has_write_items(write_candidate_patch):
+            return
+
+        ctx.trace.append(f"知识库进化后台任务已启动：{label} 将执行 embedding 规范化和 Neo4j 写入")
+        task = asyncio.create_task(
+            self._background_normalize_and_merge_topology_patch(
+                requirement=ctx.requirement,
+                features=features,
+                patch=write_candidate_patch,
+                graph_knowledge=graph_knowledge,
+                coverage=coverage,
+                label=label,
+            )
+        )
+        task.add_done_callback(self._consume_background_task_result)
+
+    async def _background_normalize_and_merge_topology_patch(
+        self,
+        requirement: str,
+        features: ExtractedFeatures,
+        patch: dict[str, Any],
+        graph_knowledge: dict[str, Any],
+        coverage: dict[str, Any],
+        label: str,
+    ) -> None:
+        started = time.perf_counter()
+        normalization = await self.graph_service.normalize_topology_patch(
+            patch,
+            requirement,
+            features,
+            graph_knowledge,
+            coverage,
+        )
+        write_patch = normalization.get("write_patch", normalization.get("trial_patch", patch))
+        if self._patch_has_write_items(write_patch):
+            await asyncio.to_thread(
+                self.graph_service.merge_topology_patch,
+                requirement,
+                features,
+                write_patch,
+            )
+        elapsed = time.perf_counter() - started
+        print(f"[topology-background] {label} normalized and merged in {elapsed:.1f}s")
+
+    @staticmethod
+    def _consume_background_task_result(task: asyncio.Task) -> None:
+        try:
+            task.result()
+        except Exception as exc:
+            print(f"[topology-background] knowledge evolution failed: {exc}")
 
     async def _analyze(self, ctx: ReasoningContext):
         ctx.trace.append("需求解析 Agent 接收自然语言需求")
@@ -756,6 +815,7 @@ class HybridReasoningOrchestrator:
         fast_mode = topology_options.get("fast_mode")
         timeout = topology_options.get("llm_timeout_seconds")
         rounds = topology_options.get("repair_max_rounds")
+        normalized_timeout = cls._normalize_topology_timeout(timeout)
         return ReasoningContext(
             requirement=requirement,
             top_k=top_k,
@@ -765,21 +825,42 @@ class HybridReasoningOrchestrator:
                 "HybridReasoningOrchestrator 启动 LangChain 风格链式编排",
                 "拓扑生成配置："
                 f"{'快速模式' if (cls.TOPOLOGY_FAST_MODE if fast_mode is None else bool(fast_mode)) else '精细模式'}，"
-                f"LLM 超时 {float(timeout if timeout is not None else cls.TOPOLOGY_LLM_TIMEOUT_SECONDS):.0f}s，"
+                f"LLM 超时 {cls._timeout_label(normalized_timeout)}，"
                 f"补全轮数 {int(rounds if rounds is not None else cls.TOPOLOGY_REPAIR_MAX_ROUNDS)}",
             ],
             decision_trace={},
             composition_recommendation={},
             topology_fast_mode=cls.TOPOLOGY_FAST_MODE if fast_mode is None else bool(fast_mode),
-            topology_llm_timeout_seconds=max(
-                3.0,
-                min(60.0, float(timeout if timeout is not None else cls.TOPOLOGY_LLM_TIMEOUT_SECONDS)),
-            ),
+            topology_llm_timeout_seconds=normalized_timeout,
             topology_repair_max_rounds=max(
                 0,
                 min(3, int(rounds if rounds is not None else cls.TOPOLOGY_REPAIR_MAX_ROUNDS)),
             ),
         )
+
+    @classmethod
+    def _normalize_topology_timeout(cls, timeout: Any) -> float | None:
+        if timeout is None:
+            return max(3.0, float(cls.TOPOLOGY_LLM_TIMEOUT_SECONDS))
+        try:
+            value = float(timeout)
+        except (TypeError, ValueError):
+            return max(3.0, float(cls.TOPOLOGY_LLM_TIMEOUT_SECONDS))
+        if value <= 0:
+            return None
+        return max(3.0, value)
+
+    @staticmethod
+    async def _maybe_wait_for(awaitable, timeout: float | None):
+        if timeout is None:
+            return await awaitable
+        return await asyncio.wait_for(awaitable, timeout=timeout)
+
+    @staticmethod
+    def _timeout_label(timeout: float | None) -> str:
+        if timeout is None:
+            return "无上限"
+        return f"{timeout:.0f}s"
 
     @staticmethod
     def _build_decision_trace(

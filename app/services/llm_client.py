@@ -11,6 +11,8 @@ import httpx
 
 from app.models.schemas import CandidateEvaluation, ExtractedFeatures
 
+_DEFAULT_TIMEOUT = object()
+
 
 class LLMClient:
     """OpenAI-compatible LLM adapter. DeepSeek, Qwen compatible gateways can use it."""
@@ -344,6 +346,7 @@ class LLMClient:
         features: ExtractedFeatures,
         coverage: dict[str, Any],
         graph_knowledge: dict[str, Any],
+        request_timeout: float | None | object = _DEFAULT_TIMEOUT,
     ) -> dict[str, Any] | None:
         if not self.api_key:
             return None
@@ -396,7 +399,7 @@ class LLMClient:
             "response_format": {"type": "json_object"},
             "max_tokens": 1400,
         }
-        content = await self._chat(payload)
+        content = await self._chat(payload, request_timeout=request_timeout)
         if not content:
             return None
         try:
@@ -410,6 +413,7 @@ class LLMClient:
         requirement: str,
         features: ExtractedFeatures,
         graph_knowledge: dict[str, Any],
+        request_timeout: float | None | object = _DEFAULT_TIMEOUT,
     ) -> dict[str, Any] | None:
         if not self.api_key:
             return None
@@ -448,7 +452,7 @@ class LLMClient:
             "response_format": {"type": "json_object"},
             "max_tokens": 1400,
         }
-        content = await self._chat(payload)
+        content = await self._chat(payload, request_timeout=request_timeout)
         if not content:
             return None
         try:
@@ -782,11 +786,16 @@ class LLMClient:
         }
         return features.model_copy(update={"topology_expectations": normalized})
 
-    async def _chat(self, payload: dict[str, Any]) -> str | None:
+    async def _chat(
+        self,
+        payload: dict[str, Any],
+        request_timeout: float | None | object = _DEFAULT_TIMEOUT,
+    ) -> str | None:
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        timeout = self.timeout if request_timeout is _DEFAULT_TIMEOUT else request_timeout
         try:
             self.last_error = None
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.post(self.chat_url, headers=headers, json=payload)
                 response.raise_for_status()
                 data = response.json()
